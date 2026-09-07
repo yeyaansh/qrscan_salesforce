@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Rack Audit</title>
+<meta name="theme-color" content="#14181F" />
+<meta name="description" content="Scan and verify store racks against Salesforce during store visits." />
+
+<link rel="manifest" href="/manifest.json" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Rack Audit" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- Status strip: hidden on the login screen, shown everywhere else -->
+  <div class="status-strip" id="statusStrip" style="display:none;">
+    <span><span class="dot"></span><span id="statusStoreLabel">—</span></span>
+    <span class="progress" id="statusProgress"></span>
+  </div>
+
+  <!-- ── LOGIN ─────────────────────────────────────────────── -->
+  <section class="screen active" id="screen-login">
+    <div style="flex:1; display:flex; flex-direction:column; justify-content:center;">
+      <h1>Rack Audit</h1>
+      <p class="muted">Sign in with the username and password your admin gave you.</p>
+
+      <form id="loginForm" style="margin-top:24px;">
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <div class="error-text" id="loginError"></div>
+        <button class="btn btn-primary" type="submit" id="loginBtn">Log in</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ── SELFIE ────────────────────────────────────────────── -->
+  <section class="screen" id="screen-selfie">
+    <h2>Confirm it's you</h2>
+    <p class="muted">Take a quick photo to start this store visit. This is attached to today's audit record.</p>
+
+    <div class="camera-wrap" style="margin-top:16px;">
+      <video id="selfieVideo" playsinline muted></video>
+      <img id="selfiePreview" style="display:none; width:100%; height:100%; object-fit:cover;" />
+    </div>
+    <div class="error-text" id="selfieError"></div>
+
+    <div class="action-bar">
+      <button class="btn btn-primary" id="selfieShootBtn">Take photo</button>
+      <div id="selfieConfirmRow" style="display:none; display:flex; gap:10px; margin-top:10px;">
+        <button class="btn btn-secondary" id="selfieRetakeBtn">Retake</button>
+        <button class="btn btn-primary" id="selfieContinueBtn">Continue</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── STORE LOOKUP ──────────────────────────────────────── -->
+  <section class="screen" id="screen-store">
+    <h2>Which store?</h2>
+    <p class="muted">Enter the store number or name to pull its rack list from Salesforce.</p>
+
+    <div class="field" style="margin-top:16px;">
+      <label for="storeQuery">Store number or name</label>
+      <input id="storeQuery" placeholder="e.g. 4021 or Riverside Plaza" />
+    </div>
+    <div class="error-text" id="storeError"></div>
+
+    <div id="storeResult" style="display:none;">
+      <div class="rack-tag" style="border-left-color:var(--ink);">
+        <div>
+          <div class="rack-id" id="storeResultName"></div>
+          <div class="rack-label" id="storeResultNumber"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="action-bar">
+      <button class="btn btn-secondary" id="storeFindBtn">Find store</button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-primary" id="storeStartBtn" disabled>Start visit</button>
+    </div>
+  </section>
+
+  <!-- ── RACK CHECKLIST ────────────────────────────────────── -->
+  <section class="screen" id="screen-checklist">
+    <h2 id="checklistStoreName">Store</h2>
+    <p class="muted">Scan every rack listed below. Tap a specific rack to scan it out of order.</p>
+
+    <ul class="rack-list" id="rackList" style="margin-top:14px;"></ul>
+
+    <div class="action-bar">
+      <button class="btn btn-primary" id="scanNextBtn">Scan next rack</button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-secondary" id="finishVisitBtn">Finish visit</button>
+    </div>
+  </section>
+
+  <!-- ── QR SCAN ───────────────────────────────────────────── -->
+  <section class="screen" id="screen-scan">
+    <h2 id="scanRackLabel">Rack</h2>
+    <p class="muted">Expected code: <span class="mono" id="scanExpectedCode">—</span></p>
+
+    <div class="camera-wrap">
+      <div id="qr-reader" style="width:100%; height:100%;"></div>
+      <div class="scan-frame">
+        <span class="corner tl"></span><span class="corner tr"></span>
+        <span class="corner bl"></span><span class="corner br"></span>
+      </div>
+    </div>
+    <div class="error-text" id="scanError"></div>
+
+    <button class="btn btn-ghost" id="manualEntryToggle" style="margin-top:8px;">Trouble scanning? Enter code manually</button>
+    <div id="manualEntryRow" style="display:none; gap:10px; margin-top:8px;">
+      <div class="field" style="flex:1;">
+        <input id="manualCodeInput" placeholder="Type the code printed on the rack" />
+      </div>
+      <button class="btn btn-secondary" id="manualEntrySubmit" style="width:auto; padding:13px 18px;">Check</button>
+    </div>
+
+    <div class="action-bar">
+      <button class="btn btn-ghost" id="scanCancelBtn">Back to checklist</button>
+    </div>
+  </section>
+
+  <!-- ── DISCREPANCY ───────────────────────────────────────── -->
+  <section class="screen" id="screen-discrepancy">
+    <h2>Doesn't match</h2>
+    <p class="muted">
+      Expected <span class="mono" id="discExpected"></span>, scanned <span class="mono" id="discScanned"></span>.
+      Explain what you found.
+    </p>
+
+    <div class="field">
+      <label for="discNotes">Notes</label>
+      <textarea id="discNotes" placeholder="e.g. rack was moved to the endcap, or relabeled with a new code"></textarea>
+    </div>
+
+    <div class="camera-wrap" id="discCameraWrap" style="max-height:220px; display:none;">
+      <video id="discVideo" playsinline muted></video>
+      <img id="discPreview" style="display:none; width:100%; height:100%; object-fit:cover;" />
+    </div>
+    <button class="btn btn-secondary" id="discPhotoBtn" style="margin-top:10px;">Attach a photo</button>
+
+    <div class="action-bar">
+      <button class="btn btn-primary" id="discResolveBtn">Save — I resolved this on the spot</button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-secondary" id="discEscalateBtn" style="border-color:var(--alert); color:var(--alert);">Escalate — notify manager</button>
+    </div>
+  </section>
+
+  <!-- ── SIGNATURE ─────────────────────────────────────────── -->
+  <section class="screen" id="screen-signature">
+    <h2>Sign off</h2>
+    <p class="muted">Sign to confirm this visit is complete and accurate.</p>
+
+    <canvas class="signature-pad" id="signatureCanvas"></canvas>
+    <button class="btn btn-ghost" id="signatureClearBtn" style="margin-top:6px;">Clear</button>
+
+    <div class="action-bar">
+      <button class="btn btn-primary" id="signatureSubmitBtn">Complete visit</button>
+    </div>
+  </section>
+
+  <!-- ── SUMMARY ───────────────────────────────────────────── -->
+  <section class="screen" id="screen-summary">
+    <h2>Visit complete</h2>
+    <div id="summaryBody" style="margin-top:12px;"></div>
+
+    <div class="action-bar">
+      <button class="btn btn-primary" id="summaryNewVisitBtn">Start next store</button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-ghost" id="logoutBtn">Log out</button>
+    </div>
+  </section>
+
+</div>
+
+<div class="stamp" id="stampOverlay"><div class="mark" id="stampMark"></div></div>
+<div class="toast" id="toast" style="display:none;"></div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="/js/state.js"></script>
+<script src="/js/api.js"></script>
+<script src="/js/geolocation.js"></script>
+<script src="/js/camera.js"></script>
+<script src="/js/qrscanner.js"></script>
+<script src="/js/signature.js"></script>
+<script src="/js/app.js"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js"));
+  }
+</script>
+</body>
+</html>

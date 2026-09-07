@@ -1,0 +1,181 @@
+/* ── Design tokens ──────────────────────────────────────────────
+   Direction: a field inspection tag/clipboard tool, not a SaaS dashboard.
+   Ink-navy chrome, kraft-paper screens, stamped-condensed headlines,
+   monospace for literal scan data (rack codes, timestamps). Status
+   color (green/amber) is reserved ONLY for verify state, never decoration. */
+:root {
+  --ink: #14181f;
+  --ink-2: #1e2430;
+  --paper: #ede6d6;
+  --card: #f7f3e9;
+  --line: #cbc1aa;
+  --text: #1c1b17;
+  --muted: #6b6355;
+  --pass: #2f8f46;
+  --pass-bg: #dfebd9;
+  --alert: #c4512b;
+  --alert-bg: #f3ded2;
+  --white: #ffffff;
+
+  --font-display: "Barlow Condensed", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+
+  --radius: 4px;
+  --thumb-zone: 84px;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font-family: var(--font-body);
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+h1, h2, h3 { font-family: var(--font-display); font-weight: 700; margin: 0 0 4px; letter-spacing: 0.2px; }
+h1 { font-size: 30px; line-height: 1.05; }
+h2 { font-size: 22px; line-height: 1.1; }
+p { margin: 0 0 12px; color: var(--text); line-height: 1.5; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--font-mono); }
+
+button, input, select, textarea { font-family: inherit; font-size: 16px; }
+:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+
+/* ── App shell ────────────────────────────────────────────────── */
+#app {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  position: relative;
+}
+
+.status-strip {
+  background: var(--ink);
+  color: var(--card);
+  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.status-strip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pass); display: inline-block; margin-right: 8px; }
+
+.screen {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  padding: 24px 20px calc(var(--thumb-zone) + 24px);
+  overflow-y: auto;
+}
+.screen.active { display: flex; }
+
+/* ── Buttons ──────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  font-weight: 600;
+  font-size: 16px;
+  cursor: pointer;
+  width: 100%;
+  transition: transform 0.08s ease;
+}
+.btn:active { transform: scale(0.98); }
+.btn-primary { background: var(--ink); color: var(--card); }
+.btn-secondary { background: transparent; color: var(--ink); border: 1.5px solid var(--ink); }
+.btn-ghost { background: transparent; color: var(--muted); text-decoration: underline; padding: 8px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.action-bar {
+  position: sticky;
+  bottom: 0;
+  padding: 14px 20px calc(14px + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--paper) 60%, rgba(237,230,214,0));
+}
+
+/* ── Form fields ──────────────────────────────────────────────── */
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.field input, .field textarea {
+  width: 100%;
+  border: 1.5px solid var(--line);
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 13px 14px;
+  color: var(--text);
+}
+.field textarea { resize: vertical; min-height: 88px; }
+.error-text { color: var(--alert); font-size: 13px; margin-top: -8px; margin-bottom: 12px; min-height: 16px; }
+
+/* ── Tag / rack cards ─────────────────────────────────────────── */
+.rack-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rack-tag {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--muted);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.rack-tag.verified { border-left-color: var(--pass); }
+.rack-tag.discrepancy { border-left-color: var(--alert); }
+.rack-tag .rack-id { font-family: var(--font-mono); font-size: 15px; }
+.rack-tag .rack-label { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.tag-state { font-size: 12px; font-weight: 600; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
+.tag-state.pending { background: var(--line); color: var(--ink); }
+.tag-state.verified { background: var(--pass-bg); color: var(--pass); }
+.tag-state.discrepancy { background: var(--alert-bg); color: var(--alert); }
+
+/* ── Camera / scan views ──────────────────────────────────────── */
+.camera-wrap { position: relative; background: var(--ink); border-radius: var(--radius); overflow: hidden; aspect-ratio: 3/4; }
+.camera-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.scan-frame { position: absolute; inset: 12%; pointer-events: none; }
+.scan-frame .corner { position: absolute; width: 28px; height: 28px; border: 3px solid var(--card); }
+.scan-frame .corner.tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+.scan-frame .corner.tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+.scan-frame .corner.bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+.scan-frame .corner.br { bottom: 0; right: 0; border-left: none; border-top: none; }
+
+canvas.signature-pad { width: 100%; aspect-ratio: 5/2; background: var(--card); border: 1.5px solid var(--line); border-radius: var(--radius); touch-action: none; }
+
+/* ── Stamp reveal on verified match ──────────────────────────── */
+.stamp {
+  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  pointer-events: none; z-index: 50;
+}
+.stamp .mark {
+  font-family: var(--font-display); font-weight: 700; font-size: 40px;
+  color: var(--pass); border: 5px solid var(--pass); border-radius: 10px;
+  padding: 10px 28px; transform: rotate(-8deg) scale(0.6); opacity: 0;
+  background: rgba(247,243,233,0.92);
+}
+.stamp.show .mark { animation: stampIn 0.42s cubic-bezier(.2,1.4,.4,1) forwards; }
+.stamp.alert .mark { color: var(--alert); border-color: var(--alert); }
+@keyframes stampIn { to { transform: rotate(-8deg) scale(1); opacity: 1; } }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  background: var(--ink); color: var(--card); padding: 12px 18px; border-radius: var(--radius);
+  font-size: 14px; z-index: 60; max-width: 90%; text-align: center;
+}
+
+.summary-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.summary-row:last-child { border-bottom: none; }
+
+.progress { font-family: var(--font-mono); }
