@@ -134,17 +134,23 @@ button, input, select, textarea { font-family: inherit; font-size: 16px; }
   gap: 12px;
 }
 .rack-tag.verified { border-left-color: var(--pass); }
-.rack-tag.discrepancy { border-left-color: var(--alert); }
+.rack-tag.issue { border-left-color: var(--alert); }
+.rack-tag.resolved { border-left-color: var(--pass); }
+.rack-tag.inactive { border-left-color: var(--line); opacity: 0.55; }
+.rack-tag .rack-label-main { font-family: var(--font-mono); font-size: 15px; }
 .rack-tag .rack-id { font-family: var(--font-mono); font-size: 15px; }
 .rack-tag .rack-label { color: var(--muted); font-size: 13px; margin-top: 2px; }
 .tag-state { font-size: 12px; font-weight: 600; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
 .tag-state.pending { background: var(--line); color: var(--ink); }
 .tag-state.verified { background: var(--pass-bg); color: var(--pass); }
-.tag-state.discrepancy { background: var(--alert-bg); color: var(--alert); }
+.tag-state.resolved { background: var(--pass-bg); color: var(--pass); }
+.tag-state.issue { background: var(--alert-bg); color: var(--alert); }
+.tag-state.inactive { background: var(--line); color: var(--muted); }
 
 /* ── Camera / scan views ──────────────────────────────────────── */
 .camera-wrap { position: relative; background: var(--ink); border-radius: var(--radius); overflow: hidden; aspect-ratio: 3/4; }
 .camera-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.camera-wrap video.mirrored { transform: scaleX(-1); } /* front camera only — see camera.js for why */
 .scan-frame { position: absolute; inset: 12%; pointer-events: none; }
 .scan-frame .corner { position: absolute; width: 28px; height: 28px; border: 3px solid var(--card); }
 .scan-frame .corner.tl { top: 0; left: 0; border-right: none; border-bottom: none; }
@@ -152,22 +158,68 @@ button, input, select, textarea { font-family: inherit; font-size: 16px; }
 .scan-frame .corner.bl { bottom: 0; left: 0; border-right: none; border-top: none; }
 .scan-frame .corner.br { bottom: 0; right: 0; border-left: none; border-top: none; }
 
+/* ── Loading feedback ─────────────────────────────────────────────────
+   One simple spinner, reused everywhere something is loading. Deliberately
+   plain — a rotating ring, no extra visual noise — since the goal is just
+   to answer "is this working?", not to decorate. */
+.spinner {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2.5px solid rgba(255,255,255,0.35); border-top-color: var(--card);
+  display: inline-block; vertical-align: middle; margin-right: 8px;
+  animation: spin 0.7s linear infinite;
+}
+.spinner.dark { border: 2.5px solid rgba(28,27,23,0.2); border-top-color: var(--ink); }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Covers the camera area with a spinner + message while we wait on a
+   network response (e.g. checking a scan result). Fixes the "screen just
+   goes black" gap between the camera stopping and the next screen showing. */
+.processing-overlay {
+  position: absolute; inset: 0; display: none; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  background: var(--ink); color: var(--card); font-size: 14px;
+}
+.processing-overlay.show { display: flex; }
+.processing-overlay .spinner { width: 26px; height: 26px; margin-right: 0; }
+
+/* A plain inline loading row for places that aren't a camera view —
+   store search results, the rack list while it loads, etc. */
+.loading-row { display: flex; align-items: center; gap: 10px; padding: 14px 0; color: var(--muted); font-size: 14px; }
+
 canvas.signature-pad { width: 100%; aspect-ratio: 5/2; background: var(--card); border: 1.5px solid var(--line); border-radius: var(--radius); touch-action: none; }
 
-/* ── Stamp reveal on verified match ──────────────────────────── */
-.stamp {
-  position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-  pointer-events: none; z-index: 50;
-}
-.stamp .mark {
+/* ── Result screen (replaces the old auto-dismissing stamp overlay) ──── */
+.result-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; }
+.result-icon {
+  width: 84px; height: 84px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
   font-family: var(--font-display); font-weight: 700; font-size: 40px;
-  color: var(--pass); border: 5px solid var(--pass); border-radius: 10px;
-  padding: 10px 28px; transform: rotate(-8deg) scale(0.6); opacity: 0;
-  background: rgba(247,243,233,0.92);
+  margin-bottom: 18px; border: 4px solid currentColor;
+  animation: resultPop 0.38s cubic-bezier(.2,1.4,.4,1) both;
 }
-.stamp.show .mark { animation: stampIn 0.42s cubic-bezier(.2,1.4,.4,1) forwards; }
-.stamp.alert .mark { color: var(--alert); border-color: var(--alert); }
-@keyframes stampIn { to { transform: rotate(-8deg) scale(1); opacity: 1; } }
+.result-icon.success { color: var(--pass); background: var(--pass-bg); }
+.result-icon.warning { color: var(--alert); background: var(--alert-bg); }
+.result-icon.info { color: var(--ink); background: var(--card); }
+@keyframes resultPop { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* ── Install banner ──────────────────────────────────────────────────── */
+.install-banner {
+  display: none; align-items: center; gap: 10px;
+  background: var(--ink); color: var(--card);
+  padding: 10px 14px; font-size: 13px;
+}
+.install-banner.show { display: flex; }
+.install-banner .install-copy { flex: 1; }
+.install-banner .btn-install {
+  background: var(--pass); color: var(--white); border: none; border-radius: var(--radius);
+  padding: 7px 12px; font-weight: 600; font-size: 13px; cursor: pointer;
+}
+.install-banner .btn-dismiss { background: none; border: none; color: var(--card); font-size: 15px; cursor: pointer; padding: 4px; opacity: 0.7; }
+
+.summary-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.summary-row:last-child { border-bottom: none; }
+
+.progress { font-family: var(--font-mono); }
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -175,7 +227,25 @@ canvas.signature-pad { width: 100%; aspect-ratio: 5/2; background: var(--card); 
   font-size: 14px; z-index: 60; max-width: 90%; text-align: center;
 }
 
-.summary-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
-.summary-row:last-child { border-bottom: none; }
+/* ── Confirmation modal ──────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(20, 24, 31, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 70; padding: 20px;
+}
+.modal-box {
+  background: var(--card); border-radius: var(--radius);
+  padding: 22px 20px; width: 100%; max-width: 360px;
+}
+.modal-box p { margin: 0 0 18px; font-size: 15px; line-height: 1.5; }
 
-.progress { font-family: var(--font-mono); }
+/* ── Rack dimensions (shown on a verified result) ────────────────────── */
+.rack-dimensions {
+  margin-top: 16px; padding: 14px 16px; background: var(--card);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  text-align: left; width: 100%;
+}
+.rack-dimensions .dim-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; }
+.rack-dimensions .dim-row span:last-child { font-family: var(--font-mono); color: var(--muted); }
+
+.required-mark { color: var(--alert); }

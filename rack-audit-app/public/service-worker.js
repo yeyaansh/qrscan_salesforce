@@ -1,13 +1,15 @@
-const CACHE = "rack-audit-shell-v1";
+const CACHE = "rack-audit-shell-v2";
 const SHELL_FILES = [
   "/",
   "/css/style.css",
-  "/js/api.js",
   "/js/state.js",
+  "/js/api.js",
+  "/js/geolocation.js",
   "/js/camera.js",
   "/js/qrscanner.js",
   "/js/signature.js",
-  "/js/geolocation.js",
+  "/js/guard.js",
+  "/js/install.js",
   "/js/app.js",
   "/manifest.json",
 ];

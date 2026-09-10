@@ -1,9 +1,8 @@
-const SignaturePad = (() => {
-  let canvas, ctx, drawing = false, hasStrokes = false;
+let canvas, ctx, drawing = false, hasStrokes = false;
 
-  function init(canvasEl) {
+export const SignaturePad = {
+  init(canvasEl) {
     canvas = canvasEl;
-    // Match backing resolution to displayed size for crisp lines.
     const ratio = window.devicePixelRatio || 1;
     canvas.width = canvas.clientWidth * ratio;
     canvas.height = canvas.clientHeight * ratio;
@@ -19,7 +18,6 @@ const SignaturePad = (() => {
       const point = e.touches ? e.touches[0] : e;
       return { x: point.clientX - rect.left, y: point.clientY - rect.top };
     };
-
     const down = (e) => {
       drawing = true;
       hasStrokes = true;
@@ -40,21 +38,19 @@ const SignaturePad = (() => {
     canvas.addEventListener("pointerdown", down);
     canvas.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
-  }
+  },
 
-  function clear() {
+  clear() {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     hasStrokes = false;
-  }
+  },
 
-  function isSigned() {
+  isSigned() {
     return hasStrokes;
-  }
+  },
 
-  function toDataUrl() {
+  toDataUrl() {
     return canvas.toDataURL("image/png");
-  }
-
-  return { init, clear, isSigned, toDataUrl };
-})();
+  },
+};

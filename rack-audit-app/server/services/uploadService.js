@@ -1,11 +1,10 @@
-const cloudinary = require("../config/cloudinary");
+import cloudinary from "../config/cloudinary.js";
 
 /**
  * Uploads a base64 data-URL image (as produced by <canvas>.toDataURL() on
- * the frontend) to Cloudinary and returns the public HTTPS URL to store on
- * the Mongo document.
+ * the frontend) to Cloudinary and returns the public HTTPS URL.
  */
-async function uploadDataUrl(dataUrl, folder) {
+export async function uploadDataUrl(dataUrl, folder) {
   if (!dataUrl) return null;
   const result = await cloudinary.uploader.upload(dataUrl, {
     folder: `rack-audit/${folder}`,
@@ -13,5 +12,3 @@ async function uploadDataUrl(dataUrl, folder) {
   });
   return result.secure_url;
 }
-
-module.exports = { uploadDataUrl };

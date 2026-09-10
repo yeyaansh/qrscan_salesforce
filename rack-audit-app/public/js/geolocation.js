@@ -1,5 +1,7 @@
-const Geo = (() => {
-  function capture(options = { enableHighAccuracy: true, timeout: 10000 }) {
+import { getDeviceId } from "./state.js";
+
+export const Geo = {
+  capture(options = { enableHighAccuracy: true, timeout: 10000 }) {
     return new Promise((resolve) => {
       if (!("geolocation" in navigator)) {
         resolve(null);
@@ -17,12 +19,10 @@ const Geo = (() => {
         options
       );
     });
-  }
+  },
+};
 
-  return { capture };
-})();
-
-function getDeviceInfo() {
+export function getDeviceInfo() {
   return {
     userAgent: navigator.userAgent,
     platform: navigator.platform || "",

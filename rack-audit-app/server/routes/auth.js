@@ -1,14 +1,13 @@
-const express = require("express");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const Agent = require("../models/Agent");
-const { requireAuth } = require("../middleware/auth");
+import express from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import Agent from "../models/Agent.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const router = express.Router();
 
-// NOTE: there is intentionally no POST /register route. Accounts are only
-// ever created by an admin — see scripts/seedAgent.js — which is exactly
-// the "admin gives out the username/password" requirement.
+// No POST /register route on purpose — accounts are only ever created by an
+// admin (see scripts/seedAgent.js).
 router.post("/login", async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
@@ -31,12 +30,7 @@ router.post("/login", async (req, res) => {
 
   res.json({
     token,
-    agent: {
-      id: agent._id,
-      fullName: agent.fullName,
-      username: agent.username,
-      position: agent.position,
-    },
+    agent: { id: agent._id, fullName: agent.fullName, username: agent.username, position: agent.position },
   });
 });
 
@@ -45,4 +39,4 @@ router.get("/me", requireAuth, (req, res) => {
   res.json({ id: _id, fullName, username, position, email });
 });
 
-module.exports = router;
+export default router;

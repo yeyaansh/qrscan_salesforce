@@ -9,6 +9,9 @@
 
 <link rel="manifest" href="/manifest.json" />
 <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<!-- mobile-web-app-capable is the current standard; apple-mobile-web-app-capable
+     is kept alongside it for older iOS Safari versions that don't read the new one. -->
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Rack Audit" />
@@ -21,10 +24,15 @@
 <body>
 <div id="app">
 
-  <!-- Status strip: hidden on the login screen, shown everywhere else -->
   <div class="status-strip" id="statusStrip" style="display:none;">
     <span><span class="dot"></span><span id="statusStoreLabel">—</span></span>
     <span class="progress" id="statusProgress"></span>
+  </div>
+
+  <div class="install-banner" id="installBanner">
+    <span class="install-copy">Install this app for quicker access.</span>
+    <button class="btn-install" id="installBtn">Install</button>
+    <button class="btn-dismiss" id="installDismissBtn" aria-label="Dismiss">✕</button>
   </div>
 
   <!-- ── LOGIN ─────────────────────────────────────────────── -->
@@ -33,7 +41,13 @@
       <h1>Rack Audit</h1>
       <p class="muted">Sign in with the username and password your admin gave you.</p>
 
-      <form id="loginForm" style="margin-top:24px;">
+      <!-- method="post" is a deliberate safety net: our JavaScript always
+           intercepts this submit and calls preventDefault(), but if that
+           JavaScript hasn't finished loading yet (slow connection) and the
+           form submits natively, POST keeps the password out of the URL.
+           Without this, the browser's default is GET, which would put the
+           username and password directly in the address bar and history. -->
+      <form id="loginForm" method="post" style="margin-top:24px;">
         <div class="field">
           <label for="username">Username</label>
           <input id="username" name="username" autocomplete="username" required />
@@ -56,12 +70,19 @@
     <div class="camera-wrap" style="margin-top:16px;">
       <video id="selfieVideo" playsinline muted></video>
       <img id="selfiePreview" style="display:none; width:100%; height:100%; object-fit:cover;" />
+      <!-- Shown only while the camera is starting up (waiting for the
+           permission prompt and the stream to attach). Without this, that
+           wait looks like a plain black box with no explanation. -->
+      <div class="processing-overlay" id="selfieLoadingOverlay">
+        <span class="spinner"></span>
+        <span>Starting camera…</span>
+      </div>
     </div>
     <div class="error-text" id="selfieError"></div>
 
     <div class="action-bar">
       <button class="btn btn-primary" id="selfieShootBtn">Take photo</button>
-      <div id="selfieConfirmRow" style="display:none; display:flex; gap:10px; margin-top:10px;">
+      <div id="selfieConfirmRow" style="display:none; gap:10px; margin-top:10px;">
         <button class="btn btn-secondary" id="selfieRetakeBtn">Retake</button>
         <button class="btn btn-primary" id="selfieContinueBtn">Continue</button>
       </div>
@@ -75,44 +96,41 @@
 
     <div class="field" style="margin-top:16px;">
       <label for="storeQuery">Store number or name</label>
-      <input id="storeQuery" placeholder="e.g. 4021 or Riverside Plaza" />
+      <input id="storeQuery" placeholder="e.g. river or 4021" />
     </div>
     <div class="error-text" id="storeError"></div>
 
-    <div id="storeResult" style="display:none;">
-      <div class="rack-tag" style="border-left-color:var(--ink);">
-        <div>
-          <div class="rack-id" id="storeResultName"></div>
-          <div class="rack-label" id="storeResultNumber"></div>
-        </div>
-      </div>
-    </div>
+    <!-- Search results appear here as a tappable list. Tapping a store
+         immediately starts the visit for that store — there's no separate
+         "confirm" button, so the action stays right next to what you tapped
+         instead of the button being far below it. -->
+    <ul class="rack-list" id="storeResultsList" style="margin-top:4px;"></ul>
 
     <div class="action-bar">
-      <button class="btn btn-secondary" id="storeFindBtn">Find store</button>
-      <div style="height:10px;"></div>
-      <button class="btn btn-primary" id="storeStartBtn" disabled>Start visit</button>
+      <button class="btn btn-primary" id="storeFindBtn">Search</button>
     </div>
   </section>
 
   <!-- ── RACK CHECKLIST ────────────────────────────────────── -->
   <section class="screen" id="screen-checklist">
     <h2 id="checklistStoreName">Store</h2>
-    <p class="muted">Scan every rack listed below. Tap a specific rack to scan it out of order.</p>
+    <p class="muted">Tap a rack to scan it directly, or use Quick Scan to scan whatever's in front of you.</p>
 
     <ul class="rack-list" id="rackList" style="margin-top:14px;"></ul>
 
     <div class="action-bar">
       <button class="btn btn-primary" id="scanNextBtn">Scan next rack</button>
       <div style="height:10px;"></div>
-      <button class="btn btn-secondary" id="finishVisitBtn">Finish visit</button>
+      <button class="btn btn-secondary" id="openScanBtn">Quick scan — any rack</button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-ghost" id="finishVisitBtn">Finish visit</button>
     </div>
   </section>
 
-  <!-- ── QR SCAN ───────────────────────────────────────────── -->
+  <!-- ── QR SCAN (blind — no code is ever shown here) ───────── -->
   <section class="screen" id="screen-scan">
     <h2 id="scanRackLabel">Rack</h2>
-    <p class="muted">Expected code: <span class="mono" id="scanExpectedCode">—</span></p>
+    <p class="muted" id="scanSubtitle">Scan this rack's QR code to verify it.</p>
 
     <div class="camera-wrap">
       <div id="qr-reader" style="width:100%; height:100%;"></div>
@@ -120,45 +138,83 @@
         <span class="corner tl"></span><span class="corner tr"></span>
         <span class="corner bl"></span><span class="corner br"></span>
       </div>
+      <!-- Shown the instant a code is decoded, replacing the (otherwise
+           blank/black) camera view while we wait for the server to check
+           the result. This is what fixes the "screen just goes black"
+           feeling — there's always something telling you it's working. -->
+      <div class="processing-overlay" id="scanProcessingOverlay">
+        <span class="spinner"></span>
+        <span>Checking…</span>
+      </div>
     </div>
     <div class="error-text" id="scanError"></div>
-
-    <button class="btn btn-ghost" id="manualEntryToggle" style="margin-top:8px;">Trouble scanning? Enter code manually</button>
-    <div id="manualEntryRow" style="display:none; gap:10px; margin-top:8px;">
-      <div class="field" style="flex:1;">
-        <input id="manualCodeInput" placeholder="Type the code printed on the rack" />
-      </div>
-      <button class="btn btn-secondary" id="manualEntrySubmit" style="width:auto; padding:13px 18px;">Check</button>
-    </div>
 
     <div class="action-bar">
       <button class="btn btn-ghost" id="scanCancelBtn">Back to checklist</button>
     </div>
   </section>
 
-  <!-- ── DISCREPANCY ───────────────────────────────────────── -->
-  <section class="screen" id="screen-discrepancy">
-    <h2>Doesn't match</h2>
-    <p class="muted">
-      Expected <span class="mono" id="discExpected"></span>, scanned <span class="mono" id="discScanned"></span>.
-      Explain what you found.
-    </p>
+  <!-- ── RESULT (shared: verified / already verified / inactive / unknown / already flagged) ── -->
+  <section class="screen" id="screen-result">
+    <div class="result-body">
+      <div class="result-icon" id="resultIcon"></div>
+      <h2 id="resultTitle"></h2>
+      <p class="muted" id="resultSubtitle"></p>
+
+      <!-- Only populated for a "verified" result — the rack's spec details,
+           for a quick sanity check against what's physically there. -->
+      <div class="rack-dimensions" id="resultDimensions" style="display:none;"></div>
+    </div>
+    <div class="action-bar">
+      <button class="btn btn-primary" id="resultPrimaryBtn"></button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-secondary" id="resultSecondaryBtn" style="display:none;"></button>
+    </div>
+  </section>
+
+  <!-- ── REPORT (never reveals the expected code) ─────────────
+       Used for: a mismatched scan, a rack whose dimensions look wrong
+       even though it verified, or a code that didn't match any rack at
+       all (in which case reportRackId is null and there's no "resolved"
+       option, since there's no record to mark resolved). -->
+  <section class="screen" id="screen-report">
+    <h2 id="reportTitle">Report an issue</h2>
+    <p class="muted" id="reportSubtitle">Let us know what you found.</p>
 
     <div class="field">
-      <label for="discNotes">Notes</label>
-      <textarea id="discNotes" placeholder="e.g. rack was moved to the endcap, or relabeled with a new code"></textarea>
+      <label for="reportReason">Reason</label>
+      <select id="reportReason">
+        <option value="">Select a reason…</option>
+        <option value="Wrong rack found here">Wrong rack found here</option>
+        <option value="Rack is missing">Rack is missing</option>
+        <option value="Rack has moved to a different location">Rack has moved to a different location</option>
+        <option value="Rack dimensions don't match records">Rack dimensions don't match records</option>
+        <option value="QR code damaged or unreadable">QR code damaged or unreadable</option>
+        <option value="other">Other — describe below</option>
+      </select>
     </div>
 
-    <div class="camera-wrap" id="discCameraWrap" style="max-height:220px; display:none;">
-      <video id="discVideo" playsinline muted></video>
-      <img id="discPreview" style="display:none; width:100%; height:100%; object-fit:cover;" />
+    <div class="field" id="reportCustomReasonField" style="display:none;">
+      <label for="reportCustomReason">Your own reason</label>
+      <input id="reportCustomReason" placeholder="Describe the reason" />
     </div>
-    <button class="btn btn-secondary" id="discPhotoBtn" style="margin-top:10px;">Attach a photo</button>
+
+    <div class="field">
+      <label for="reportNotes">Description <span class="required-mark">*</span></label>
+      <textarea id="reportNotes" placeholder="What did you find? What did you do about it?"></textarea>
+    </div>
+
+    <div class="camera-wrap" id="reportCameraWrap" style="max-height:220px; display:none;">
+      <video id="reportVideo" playsinline muted></video>
+      <img id="reportPreview" style="display:none; width:100%; height:100%; object-fit:cover;" />
+    </div>
+    <button class="btn btn-secondary" id="reportPhotoBtn" style="margin-top:10px;">Attach a photo <span class="required-mark">*</span></button>
+    <div class="error-text" id="reportError"></div>
 
     <div class="action-bar">
-      <button class="btn btn-primary" id="discResolveBtn">Save — I resolved this on the spot</button>
+      <button class="btn btn-primary" id="reportResolveBtn">Save — I resolved this issue</button>
       <div style="height:10px;"></div>
-      <button class="btn btn-secondary" id="discEscalateBtn" style="border-color:var(--alert); color:var(--alert);">Escalate — notify manager</button>
+      <button class="btn btn-secondary" id="reportEscalateBtn" style="border-color:var(--alert); color:var(--alert);">Report issue</button>
     </div>
   </section>
 
@@ -189,17 +245,26 @@
 
 </div>
 
-<div class="stamp" id="stampOverlay"><div class="mark" id="stampMark"></div></div>
 <div class="toast" id="toast" style="display:none;"></div>
 
+<!-- Reusable confirmation modal — used instead of the browser's native
+     confirm(), whose OK/Cancel buttons don't say what they actually do.
+     This version always has explicit, situation-specific button labels. -->
+<div class="modal-overlay" id="confirmModalOverlay" style="display:none;">
+  <div class="modal-box">
+    <p id="confirmModalMessage"></p>
+    <button class="btn btn-primary" id="confirmModalConfirmBtn"></button>
+    <div style="height:10px;"></div>
+    <button class="btn btn-secondary" id="confirmModalCancelBtn"></button>
+  </div>
+</div>
+
+<!-- Classic script (not a module) — sets a global `Html5Qrcode` that
+     public/js/qrscanner.js references. -->
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="/js/state.js"></script>
-<script src="/js/api.js"></script>
-<script src="/js/geolocation.js"></script>
-<script src="/js/camera.js"></script>
-<script src="/js/qrscanner.js"></script>
-<script src="/js/signature.js"></script>
-<script src="/js/app.js"></script>
+<!-- Single module entry point — everything else is pulled in via import,
+     so the dependency graph is explicit instead of relying on script order. -->
+<script type="module" src="/js/app.js"></script>
 <script>
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js"));

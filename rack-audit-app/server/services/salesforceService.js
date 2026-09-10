@@ -1,41 +1,44 @@
 /**
- * Server-to-server Salesforce connection.
+ * Server-to-server Salesforce connection — the ONLY place in this app that
+ * knows how to talk to Salesforce, and the ONLY place that ever sees a
+ * rack's real QR code. Routes never receive or forward that value to the
+ * browser; every comparison happens in here.
  *
- * The app authenticates itself to Salesforce ONCE, as a single integration
- * user, using the OAuth 2.0 JWT Bearer flow — no agent ever enters Salesforce
- * credentials. Every agent who is logged into the app (via /api/auth) and
- * has an allowed `position` shares this same backend connection.
- *
- * Setup in Salesforce (Setup → App Manager → New Connected App):
- *  1. Enable OAuth Settings, check "Use digital signatures", upload the
- *     public certificate that pairs with SF_PRIVATE_KEY_PATH below.
- *  2. OAuth scopes: "Manage user data via APIs (api)", "Perform requests at
- *     any time (refresh_token, offline_access)".
- *  3. Under the Connected App's policy, set "Permitted Users" to
- *     "Admin approved users are pre-authorized" and pre-authorize the
- *     integration user (SF_USERNAME).
- *  4. Copy the Consumer Key into SF_CLIENT_ID.
+ * The app authenticates itself once, as a single integration user, using
+ * the OAuth 2.0 JWT Bearer flow — no agent ever enters Salesforce
+ * credentials. See README.md §3 for the Connected App setup steps.
  */
-const fs = require("fs");
-const path = require("path");
-const jwt = require("jsonwebtoken");
-const mock = require("./mockData");
+import fs from "fs";
+import path from "path";
+import jwt from "jsonwebtoken";
+import * as mock from "./mockData.js";
 
-const isMock = () => String(process.env.SF_MOCK).toLowerCase() === "true";
+function isMockModeEnabled() {
+  const value = String(process.env.SF_MOCK).toLowerCase();
+  if (value === "true") {
+    return true;
+  }
+  return false;
+}
 
 let cachedToken = null; // { accessToken, instanceUrl, expiresAt }
 
 function loadPrivateKey() {
+  if (process.env.SF_PRIVATE_KEY) {
+    return process.env.SF_PRIVATE_KEY.replace(/\\n/g, "\n");
+  }
   const keyPath = path.resolve(process.env.SF_PRIVATE_KEY_PATH || "./config/salesforce.key");
   return fs.readFileSync(keyPath, "utf8");
 }
 
 async function authenticate() {
-  if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) {
+  const tokenIsStillValid = cachedToken !== null && cachedToken.expiresAt > Date.now() + 60_000;
+  if (tokenIsStillValid) {
     return cachedToken;
   }
 
   const loginUrl = process.env.SF_LOGIN_URL || "https://login.salesforce.com";
+
   const assertion = jwt.sign(
     {
       iss: process.env.SF_CLIENT_ID,
@@ -47,119 +50,232 @@ async function authenticate() {
     { algorithm: "RS256" }
   );
 
-  const res = await fetch(`${loginUrl}/services/oauth2/token`, {
+  const response = await fetch(`${loginUrl}/services/oauth2/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
+      assertion: assertion,
     }),
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Salesforce auth failed (${res.status}): ${body}`);
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Salesforce auth failed (${response.status}): ${errorBody}`);
   }
 
-  const data = await res.json();
+  const data = await response.json();
   cachedToken = {
     accessToken: data.access_token,
     instanceUrl: data.instance_url,
-    expiresAt: Date.now() + 15 * 60_000, // SF access tokens are long-lived; refresh proactively anyway
+    expiresAt: Date.now() + 15 * 60_000,
   };
   return cachedToken;
 }
 
-async function sfFetch(pathAndQuery, options = {}) {
-  const { accessToken, instanceUrl } = await authenticate();
+// Makes one authenticated call to the Salesforce REST API. Every other
+// function in this file goes through this one instead of calling fetch()
+// directly, so authentication and error handling only need to be written
+// once. This is also the single spot to look at when counting how many
+// real Salesforce API calls a given operation makes — every one goes
+// through here, exactly once per call.
+async function callSalesforceApi(pathAndQuery, requestOptions = {}) {
+  const token = await authenticate();
   const apiVersion = process.env.SF_API_VERSION || "60.0";
-  const res = await fetch(`${instanceUrl}/services/data/v${apiVersion}${pathAndQuery}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Salesforce API ${res.status}: ${body}`);
-  }
-  return res.status === 204 ? null : res.json();
-}
+  const url = `${token.instanceUrl}/services/data/v${apiVersion}${pathAndQuery}`;
 
-/** Find a Store (Account) by number or name. */
-async function findStore(query) {
-  if (isMock()) return mock.findStore(query);
-
-  const soql = `SELECT Id, Name, Store_Number__c FROM Account WHERE Store_Number__c = '${escapeSoql(
-    query
-  )}' OR Name LIKE '%${escapeSoql(query)}%' LIMIT 1`;
-  const data = await sfFetch(`/query/?q=${encodeURIComponent(soql)}`);
-  const rec = data.records && data.records[0];
-  if (!rec) return null;
-  return { storeId: rec.Id, storeNumber: rec.Store_Number__c, storeName: rec.Name };
-}
-
-/** All racks (Account_Rack__c) expected at a given store. */
-async function getRacksForStore(storeId) {
-  if (isMock()) return mock.getRacksForStore(storeId);
-
-  const soql = `SELECT Id, Name, QR_Code__c, Bay_Location__c, Is_Active__c, Status__c
-                FROM Account_Rack__c WHERE Store__c = '${escapeSoql(storeId)}'`;
-  const data = await sfFetch(`/query/?q=${encodeURIComponent(soql)}`);
-  return (data.records || []).map((r) => ({
-    id: r.Id,
-    qrCode: r.QR_Code__c,
-    label: r.Bay_Location__c || r.Name,
-    isActive: r.Is_Active__c,
-    status: r.Status__c,
-  }));
-}
-
-/** Write a rack's verification result back to Account_Rack__c. */
-async function updateRackStatus(storeId, rackId, status, { verifiedBy, verifiedAt } = {}) {
-  if (isMock()) return mock.updateRackStatus(storeId, rackId, status);
-
-  await sfFetch(`/sobjects/Account_Rack__c/${rackId}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      Status__c: status, // e.g. "Verified" | "Discrepancy" | "Resolved"
-      Last_Verified_By__c: verifiedBy,
-      Last_Verified_Date__c: verifiedAt || new Date().toISOString(),
-    }),
-  });
-  return { id: rackId, status };
-}
-
-/** Create a follow-up Task assigned to the store manager for an unresolved discrepancy. */
-async function createManagerTask({ subject, description, rackId, ownerId }) {
-  if (isMock()) {
-    return { id: `00TMOCK${Date.now()}`, subject, description };
+  const headers = {
+    Authorization: `Bearer ${token.accessToken}`,
+    "Content-Type": "application/json",
+  };
+  if (requestOptions.headers) {
+    Object.assign(headers, requestOptions.headers);
   }
 
-  const data = await sfFetch(`/sobjects/Task`, {
-    method: "POST",
-    body: JSON.stringify({
-      Subject: subject,
-      Description: description,
-      WhatId: rackId, // links the Task to the Account_Rack__c record
-      OwnerId: ownerId, // Salesforce User Id of the manager, if known
-      Status: "Not Started",
-      Priority: "High",
-    }),
+  const response = await fetch(url, {
+    method: requestOptions.method,
+    body: requestOptions.body,
+    headers: headers,
   });
-  return { id: data.id, subject, description };
+
+  if (!response.ok) {
+    let errorBody = "";
+    try {
+      errorBody = await response.text();
+    } catch {
+      errorBody = "(could not read error response)";
+    }
+    throw new Error(`Salesforce API ${response.status}: ${errorBody}`);
+  }
+
+  if (response.status === 204) {
+    return null;
+  }
+  return response.json();
 }
 
 function escapeSoql(value) {
   return String(value).replace(/'/g, "\\'");
 }
 
-module.exports = {
-  findStore,
-  getRacksForStore,
-  updateRackStatus,
-  createManagerTask,
-  isMock,
-};
+// The Account_Rack__c field that scan results get written to. Deliberately
+// separate from Status__c, which tracks the rack's own lifecycle (New
+// Request/Pending/Active/Retired) — writing "Verified"/"Issue" into that
+// field would both erase the lifecycle value AND break isActive detection
+// (which reads Status__c === "Active"). Override with
+// SF_VERIFICATION_STATUS_FIELD if you ever rename the field in Salesforce.
+const VERIFICATION_STATUS_FIELD = process.env.SF_VERIFICATION_STATUS_FIELD || "Verification_Status__c";
+
+// Converts one Account_Rack__c query result into the shape the rest of
+// this app works with. The QR code and active/inactive state live on THIS
+// object (not Rack__c, which is just a shape/dimensions spec sheet with no
+// per-installation data) — confirmed via the Rack__c field screenshots.
+//
+// ASSUMPTION FLAGGED: the Rack__c dimension field API names below
+// (Rack_Shape__c, Depth__c, Width__c, Height__c, Radius__c) follow your
+// org's established naming convention but haven't been confirmed the way
+// Account_Rack__c's fields were. If a query errors with an INVALID_FIELD
+// for one of these, send me the real API name and I'll swap it in.
+function convertSalesforceRecordToRack(record) {
+  let label = "Empty Rack Name";
+  let shape = null;
+  let depth = null;
+  let width = null;
+  let height = null;
+  let radius = null;
+
+  if (record.Rack__r) {
+    label = record.Rack__r.Name;
+    shape = record.Rack__r.Rack_Shape__c || null;
+    depth = record.Rack__r.Depth__c || null;
+    width = record.Rack__r.Width__c || null;
+    height = record.Rack__r.Height__c || null;
+    radius = record.Rack__r.Radius__c || null;
+  }
+
+  const qrCode = record.Name;
+
+  let isActive = false;
+  if (record.Status__c && record.Status__c === "Active") {
+    isActive = true;
+  }
+
+  return {
+    id: record.Id, // the Account_Rack__c junction record Id
+    qrCode: qrCode,
+    label: label,
+    isActive: isActive,
+    status: record[VERIFICATION_STATUS_FIELD], // "Not Verified" / "Verified" / "Issue" / "Resolved" / "Inactive Rack Flagged"
+    dimensions: { shape: shape, depth: depth, width: width, height: height, radius: radius },
+  };
+}
+
+const RACK_QUERY_FIELDS =
+  `Id, Name, Status__c, ${VERIFICATION_STATUS_FIELD}, Install_Date__c, Rack__c, ` +
+  `Rack__r.Name, Rack__r.Rack_Shape__c, Rack__r.Depth__c, Rack__r.Width__c, Rack__r.Height__c, Rack__r.Radius__c`;
+
+/**
+ * Searches for stores (Accounts) matching a number or name. Returns an
+ * array — could be zero, one, or several matches — so the frontend can
+ * show a list for the agent to pick from.
+ */
+export async function searchStores(query) {
+  if (isMockModeEnabled()) {
+    return mock.searchStores(query);
+  }
+
+  const soql = `SELECT Id, Name, Store_Number__c FROM Account
+                WHERE Store_Number__c = '${escapeSoql(query)}' OR Name LIKE '%${escapeSoql(query)}%'
+                LIMIT 10`;
+  const data = await callSalesforceApi(`/query/?q=${encodeURIComponent(soql)}`);
+
+  const results = [];
+  for (const record of data.records || []) {
+    results.push({
+      storeId: record.Id,
+      storeNumber: record.Store_Number__c,
+      storeName: record.Name,
+    });
+  }
+  return results;
+}
+
+/**
+ * Full rack records (codes included) for a store — SERVER-SIDE USE ONLY.
+ * Used to build the client-safe checklist and to look up which rack a
+ * scanned code belongs to in "scan any rack" mode.
+ */
+export async function getRacksForStore(storeId) {
+  if (isMockModeEnabled()) {
+    return mock.getRacksForStore(storeId);
+  }
+
+  const soql = `SELECT ${RACK_QUERY_FIELDS} FROM Account_Rack__c WHERE Account__c = '${escapeSoql(storeId)}'`;
+  const data = await callSalesforceApi(`/query/?q=${encodeURIComponent(soql)}`);
+
+  const results = [];
+  for (const record of data.records || []) {
+    results.push(convertSalesforceRecordToRack(record));
+  }
+  return results;
+}
+
+/** A single Account_Rack__c, fetched fresh — the source of truth for one scan. */
+export async function getRackById(storeId, rackId) {
+  if (isMockModeEnabled()) {
+    return mock.getRackById(storeId, rackId);
+  }
+
+  const soql = `SELECT ${RACK_QUERY_FIELDS} FROM Account_Rack__c WHERE Id = '${escapeSoql(rackId)}' LIMIT 1`;
+  const data = await callSalesforceApi(`/query/?q=${encodeURIComponent(soql)}`);
+
+  const records = data.records || [];
+  if (records.length === 0) {
+    return null;
+  }
+  return convertSalesforceRecordToRack(records[0]);
+}
+
+/** Finds which rack (if any) a scanned code belongs to — powers "scan any rack" mode. */
+export async function findRackByQrCode(storeId, qrCode) {
+  if (isMockModeEnabled()) {
+    return mock.findRackByQrCode(storeId, qrCode);
+  }
+
+  const allRacksAtStore = await getRacksForStore(storeId);
+  for (const rack of allRacksAtStore) {
+    if (rack.qrCode === qrCode) {
+      return rack;
+    }
+  }
+  return null;
+}
+
+/**
+ * Writes a scan result back to the Account_Rack__c junction record.
+ * Called only at the moment something should actually be recorded — see
+ * routes/racks.js for exactly when that is (immediately on a verified
+ * match, but only once the agent makes a final decision for anything else,
+ * to avoid writing to Salesforce on every in-between attempt).
+ */
+export async function updateRackStatus(storeId, rackId, status, options = {}) {
+  if (isMockModeEnabled()) {
+    return mock.updateRackStatus(storeId, rackId, status);
+  }
+
+  const fieldsToUpdate = {
+    [VERIFICATION_STATUS_FIELD]: status,
+    Last_Verified_Date__c: new Date().toISOString().slice(0, 10), // Date-type field (YYYY-MM-DD)
+  };
+
+  if (options.verifiedByEmail) {
+    fieldsToUpdate.Last_Verified_By__c = options.verifiedByEmail; // Email-type field
+  }
+
+  await callSalesforceApi(`/sobjects/Account_Rack__c/${rackId}`, {
+    method: "PATCH",
+    body: JSON.stringify(fieldsToUpdate),
+  });
+
+  return { id: rackId, status: status };
+}

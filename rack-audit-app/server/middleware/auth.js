@@ -1,10 +1,10 @@
-const jwt = require("jsonwebtoken");
-const Agent = require("../models/Agent");
+import jwt from "jsonwebtoken";
+import Agent from "../models/Agent.js";
 
 // Positions allowed to run store audits / hit Salesforce through this app.
-const ALLOWED_POSITIONS = ["field_agent", "store_manager", "regional_manager", "admin"];
+export const ALLOWED_POSITIONS = ["field_agent", "store_manager", "regional_manager", "admin"];
 
-async function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   try {
     const header = req.headers.authorization || "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -22,9 +22,7 @@ async function requireAuth(req, res, next) {
 
     req.agent = agent;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: "Invalid or expired session" });
   }
 }
-
-module.exports = { requireAuth, ALLOWED_POSITIONS };

@@ -1,4 +1,10 @@
-const nodemailer = require("nodemailer");
+// NOT currently called from anywhere in the app. Per current architecture,
+// Salesforce owns discrepancy notifications (Case creation, emails, alerts)
+// via its own Flow/automation triggered off Status__c — this app only
+// updates that field (see routes/racks.js). Kept here in case app-triggered
+// email is ever wanted again; wire sendDiscrepancyAlert() back into a route
+// to reactivate it.
+import nodemailer from "nodemailer";
 
 function getTransport() {
   if (!process.env.SMTP_HOST) return null;
@@ -10,7 +16,7 @@ function getTransport() {
   });
 }
 
-async function sendDiscrepancyAlert({ to, storeName, storeNumber, rackLabel, scannedCode, expectedCode, notes, agentName, taskId }) {
+export async function sendDiscrepancyAlert({ to, storeName, storeNumber, rackLabel, notes, agentName }) {
   const transport = getTransport();
   const subject = `Rack discrepancy — Store ${storeNumber} (${rackLabel})`;
   const text = [
@@ -18,10 +24,7 @@ async function sendDiscrepancyAlert({ to, storeName, storeNumber, rackLabel, sca
     ``,
     `Store: ${storeName} (#${storeNumber})`,
     `Rack: ${rackLabel}`,
-    `Expected QR code: ${expectedCode}`,
-    `Scanned QR code: ${scannedCode}`,
     `Agent notes: ${notes || "(none provided)"}`,
-    taskId ? `A Salesforce Task (${taskId}) has been created for follow-up.` : "",
   ].join("\n");
 
   if (!transport) {
@@ -29,13 +32,6 @@ async function sendDiscrepancyAlert({ to, storeName, storeNumber, rackLabel, sca
     return { sent: false, reason: "SMTP not configured" };
   }
 
-  await transport.sendMail({
-    from: process.env.SMTP_FROM || "no-reply@rackaudit.app",
-    to,
-    subject,
-    text,
-  });
+  await transport.sendMail({ from: process.env.SMTP_FROM || "no-reply@rackaudit.app", to, subject, text });
   return { sent: true };
 }
-
-module.exports = { sendDiscrepancyAlert };

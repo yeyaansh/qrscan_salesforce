@@ -1,5 +1,8 @@
-const mongoose = require("mongoose");
+import mongoose from "mongoose";
 
+// The only "field person" record kept in MongoDB — proof of who visited a
+// store, when, and from where. Per-rack scan results are NOT duplicated
+// here; they live only in Salesforce (see server/services/salesforceService.js).
 const deviceInfoSchema = new mongoose.Schema(
   {
     userAgent: String,
@@ -23,7 +26,7 @@ const geoSchema = new mongoose.Schema(
 const visitSchema = new mongoose.Schema(
   {
     agent: { type: mongoose.Schema.Types.ObjectId, ref: "Agent", required: true },
-    storeId: { type: String, required: true }, // Salesforce Account/Store Id
+    storeId: { type: String, required: true }, // Salesforce Account Id
     storeNumber: { type: String, required: true },
     storeName: { type: String },
 
@@ -31,11 +34,7 @@ const visitSchema = new mongoose.Schema(
     selfieGeo: geoSchema,
     deviceInfo: deviceInfoSchema,
 
-    status: {
-      type: String,
-      enum: ["in_progress", "completed"],
-      default: "in_progress",
-    },
+    status: { type: String, enum: ["in_progress", "completed"], default: "in_progress" },
 
     signatureUrl: String,
     signedBy: String,
@@ -47,4 +46,4 @@ const visitSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("Visit", visitSchema);
+export default mongoose.model("Visit", visitSchema);
