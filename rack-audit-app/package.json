@@ -2,8 +2,8 @@
   "name": "rack-audit-app",
   "version": "1.0.0",
   "private": true,
+  "description": "Root package.json for Vercel — resolves dependencies for api/index.js. The traditional-host app (server.js) is still run from inside server/, with its own package.json/lockfile; this file is Vercel-only.",
   "type": "module",
-  "description": "Rack Audit — root package.json used by Vercel to install dependencies for /api. For local dev or Render/Railway, use server/package.json instead (see README).",
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.3",

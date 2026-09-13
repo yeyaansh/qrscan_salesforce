@@ -10,6 +10,7 @@ function convertRackForClient(rack) {
     id: rack.id,
     label: rack.label,
     isActive: rack.isActive,
+    lifecycleStatus: rack.lifecycleStatus,
     status: rack.status,
     dimensions: rack.dimensions,
   };
@@ -22,39 +23,96 @@ function convertRackForClient(rack) {
 const LOCKED_STATUSES = ["Issue", "Inactive Rack Flagged"];
 
 // Shared by both scan endpoints below, once a specific Salesforce rack
-// record has been identified. This only WRITES to Salesforce for the two
-// cases that are already final the moment they happen (a clean match, or
-// an inactive-rack anomaly, which is system-detected, not a judgment call).
-// A mismatch does NOT write anything yet — see the comment on that branch —
-// so scanning past several wrong codes on the way to the right one never
-// spams Salesforce with attempts that never mattered.
+// record has been identified. A clean match writes immediately, since
+// there's no more decision-making left once that happens. Everything else
+// — a mismatch, or a rack whose lifecycle status isn't Active — writes
+// NOTHING here. Both wait for the agent to actually decide something via
+// /report, so a run of wrong-guess scans (or scanning a rack that just
+// happens to have a stale lifecycle status) never spams Salesforce with
+// attempts that never turned into anything.
 //
-// Returns one of five outcomes:
-//   "already_verified" — this rack was checked off earlier in the visit
-//   "already_flagged"    — this rack has an open Issue/Inactive flag; only Salesforce can clear it
-//   "inactive_blocked"     — the code matched, but Salesforce marks this rack inactive
-//   "verified"               — the code matched and the rack is active
-//   "mismatch"                 — the code did not match what was expected (nothing written yet)
+// Checked in this order — earlier checks win over later ones:
+//   1. already_flagged     — an open Issue/Inactive flag; only Salesforce can clear it
+//   2. lifecycle_mismatch  — code matched, but Status__c isn't Active (checked
+//                            BEFORE already_verified/already_resolved — see note below)
+//   3. already_verified    — this rack was already checked off, and no lifecycle
+//                            problem was found above
+//   4. already_resolved    — this rack's issue was already closed out, and no
+//                            lifecycle problem was found above (see note below)
+//   5. verified             — the code matched and the rack is Active
+//   6. mismatch             — the code did not match what was expected
 async function resolveScan(storeId, rack, scannedCode, agentEmail) {
-  if (rack.status === "Verified") {
-    return { outcome: "already_verified", rack: convertRackForClient(rack) };
-  }
+  const expectedCode = String(rack.qrCode).trim();
+  const codeThatWasScanned = String(scannedCode).trim();
+  // Case- and whitespace-normalized comparison for the match check itself.
+  // A strict === here is brittle against real-world QR generation — the
+  // sticker's encoded text and Salesforce's Name field only have to differ
+  // by case, or pick up incidental whitespace, for a scan that's genuinely
+  // the right rack to be silently treated as a "mismatch" and dropped
+  // straight into the report flow. Comparing case-insensitively (while
+  // still storing/logging the ORIGINAL values below, untouched) fixes that
+  // without weakening what actually gets written anywhere.
+  const codesMatch = expectedCode.toLowerCase() === codeThatWasScanned.toLowerCase();
+
+  // Log every scan decision — cheap, and the single fastest way to
+  // pinpoint exactly why a given scan landed on the outcome it did, without
+  // having to reproduce it live. If a "should have matched" scan still
+  // shows codesMatch: false here, the two code values printed below are
+  // the first place to look — that's the actual root cause, not a status
+  // ordering bug.
+  console.log(
+    "[racks:resolveScan]",
+    JSON.stringify({
+      rackId: rack.id,
+      expectedCode,
+      scannedCode: codeThatWasScanned,
+      codesMatch,
+      lifecycleStatus: rack.lifecycleStatus,
+      isActive: rack.isActive,
+      verificationStatus: rack.status,
+    })
+  );
+
   if (LOCKED_STATUSES.includes(rack.status)) {
     return { outcome: "already_flagged", rack: convertRackForClient(rack) };
   }
 
-  const expectedCode = String(rack.qrCode).trim();
-  const codeThatWasScanned = String(scannedCode).trim();
-  const codesMatch = expectedCode === codeThatWasScanned;
-
+  // Lifecycle status takes priority over "already verified" — deliberately
+  // checked BEFORE the Verification_Status__c === "Verified" case below.
+  // Verification_Status__c can say "Verified" from an earlier visit while
+  // Status__c has since moved to Retired/Pending/New Request (or the two
+  // simply drifted out of sync some other way) — either way, a matching
+  // code means the agent is looking at a rack that is physically here but
+  // not marked Active in Salesforce right now, and that discrepancy is
+  // worth a human decision every time it's scanned. Letting "already
+  // verified" run first (the old order) silently swallowed that warning
+  // any time a rack had ever been verified before, which is exactly
+  // backwards: the rarer, more important signal should win, not the more
+  // common one.
   if (codesMatch && rack.isActive === false) {
-    // Data-integrity anomaly, not something the field agent should have to
-    // resolve — flag it and let Salesforce's own automation take it from
-    // there. This one writes immediately: it's a system-detected condition
-    // (the rack simply shouldn't be active), not a judgment call the agent
-    // is still deciding on the way to.
-    await salesforce.updateRackStatus(storeId, rack.id, "Inactive Rack Flagged");
-    return { outcome: "inactive_blocked", rack: convertRackForClient(rack) };
+    return { outcome: "lifecycle_mismatch", rack: convertRackForClient(rack) };
+  }
+
+  if (rack.status === "Verified") {
+    return { outcome: "already_verified", rack: convertRackForClient(rack) };
+  }
+
+  // Same reasoning as already_verified just above: a "Resolved" rack was
+  // already closed out (an earlier Issue got fixed and signed off), and
+  // scanning it again should not silently flip it back to "Verified" as
+  // if nothing had ever happened. Without this check, resolveScan falls
+  // straight through to the codesMatch branch below and calls
+  // updateRackStatus(..., "Verified") on it — which is exactly the bug:
+  // it doesn't just fail to prompt the agent, it actively overwrites
+  // Verification_Status__c and erases the "Resolved" history. This is
+  // reachable from BOTH scan endpoints, but in practice only shows up via
+  // "Scan Any" — the checklist's own tap targets already block a
+  // "resolved" row client-side (see renderChecklist()'s isLocked check in
+  // app.js) before a scan attempt is even made, but "Scan Any" has no
+  // specific rack to block against ahead of time, so a resolved rack's
+  // code can still be scanned there and reach this far.
+  if (rack.status === "Resolved") {
+    return { outcome: "already_resolved", rack: convertRackForClient(rack) };
   }
 
   if (codesMatch) {
@@ -65,9 +123,9 @@ async function resolveScan(storeId, rack, scannedCode, agentEmail) {
   // Codes don't match — deliberately NOT writing to Salesforce here. The
   // agent might scan a different rack next, or realize their own mistake,
   // before ever deciding this is worth reporting. Only /report (below)
-  // actually writes "Issue" or "Resolved", once the agent has made a real
-  // decision — that's what keeps this from spamming your Salesforce
-  // automation on every in-between attempt.
+  // actually writes anything, once the agent has made a real decision —
+  // that's what keeps this from spamming your Salesforce automation on
+  // every in-between attempt.
   return { outcome: "mismatch", rack: convertRackForClient(rack) };
 }
 
@@ -147,19 +205,36 @@ router.post("/scan-any", requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/racks/report — the agent's FINAL decision after a mismatch, an
-// inactive-rack flag they want to comment on, or a rack they scanned via
-// Quick Scan that didn't match anything at all. This is the only place a
-// mismatch actually gets written to Salesforce (see resolveScan above).
+// POST /api/racks/report — the agent's FINAL decision after a mismatch, a
+// rack whose lifecycle status they want to comment on, or a rack they
+// scanned via Quick Scan that didn't match anything at all. This is the
+// only place any of those actually gets written to Salesforce (see
+// resolveScan above).
 //
-// Body: { storeId, rackId (nullable), reason, notes, photo (dataURL, required), resolved }
+// visitId here is the Agent_Visit__c Id directly (see routes/stores.js) —
+// there's no Mongo document to look it up through anymore, so it's passed
+// straight to salesforce.submitRackReport() below.
+//
+// Body: { storeId, visitId, rackId (nullable), scannedCode, reason, notes,
+//         photo (dataURL, required), resolved, escalateStatus }
+// escalateStatus lets the frontend pick WHICH locked status gets written
+// when the agent escalates rather than resolves — normally "Issue", but
+// "Inactive Rack Flagged" when this report came from a lifecycle-status
+// warning rather than a plain mismatch, so Salesforce can tell those two
+// situations apart.
 router.post("/report", requireAuth, async (req, res) => {
   const storeId = req.body.storeId;
+  const agentVisitId = req.body.visitId || null;
   const rackId = req.body.rackId || null;
+  const scannedCode = req.body.scannedCode || null;
   const reason = req.body.reason;
   const notes = req.body.notes;
   const photo = req.body.photo;
   const resolved = req.body.resolved;
+  let escalateStatus = req.body.escalateStatus;
+  if (!escalateStatus) {
+    escalateStatus = "Issue";
+  }
 
   if (!storeId) {
     res.status(400).json({ error: "storeId is required" });
@@ -177,24 +252,34 @@ router.post("/report", requireAuth, async (req, res) => {
   try {
     const photoUrl = await uploadDataUrl(photo, "reports");
 
-    if (!rackId) {
-      // No matching Account_Rack__c record to update — this was a code
-      // that didn't match anything at this store. The photo is still kept
-      // (see photoUrl above) but there's nowhere in Salesforce to attach
-      // it or the notes yet. Flagging this clearly rather than guessing at
-      // a Task/Case to create — tell me the object you'd like used here
-      // (e.g. a Case on the Account) and I'll wire it in.
-      res.json({ ok: true, linkedToSalesforce: false, photoUrl: photoUrl, reason: reason, notes: notes });
-      return;
-    }
+    // When rackId is present, this is ONE Salesforce API call (a composite
+    // request updating Account_Rack__c's status AND creating the
+    // Rack_Report__c together, atomically) instead of the two separate
+    // calls it would otherwise take — see submitRackReport() for why.
+    const result = await salesforce.submitRackReport({
+      storeId: storeId,
+      rackId: rackId,
+      agentVisitId: agentVisitId,
+      scannedCode: scannedCode,
+      reason: reason,
+      notes: notes,
+      photoUrl: photoUrl,
+      resolved: !!resolved,
+      escalateStatus: escalateStatus,
+      reportedByName: req.agent.fullName,
+      reportedByEmail: req.agent.email,
+      verifiedByEmail: req.agent.email,
+    });
 
-    if (resolved) {
-      await salesforce.updateRackStatus(storeId, rackId, "Resolved", { verifiedByEmail: req.agent.email });
-    } else {
-      await salesforce.updateRackStatus(storeId, rackId, "Issue", { verifiedByEmail: req.agent.email });
-    }
-
-    res.json({ ok: true, linkedToSalesforce: true, photoUrl: photoUrl, reason: reason, notes: notes });
+    res.json({
+      ok: true,
+      linkedToRack: !!rackId,
+      rackReportId: result.rackReportId,
+      rackStatus: result.rackStatus,
+      photoUrl: photoUrl,
+      reason: reason,
+      notes: notes,
+    });
   } catch (err) {
     console.error("[racks:report] storeId=" + storeId + " rackId=" + rackId + " —", err.message);
     res.status(502).json({ error: "Could not sync with Salesforce", detail: err.message });

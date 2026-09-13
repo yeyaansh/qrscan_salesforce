@@ -5,7 +5,7 @@ screens) for field agents to visit a store, scan every rack's QR code, and
 verify the result against Salesforce in real time.
 
 **Flow:** login → selfie → enter store → scan every rack (tap-a-rack-then-scan,
-or open-camera "scan anything") → mismatches get a note + optional photo and
+or open-camera "scan anything") → mismatches get a required note + photo and
 are either resolved on the spot or flagged for follow-up → signature → visit
 summary.
 
@@ -28,25 +28,29 @@ tags or `require()` calls scattered through the code.
 | Frontend | Plain HTML/CSS/JS (ES modules), installable PWA | No build step, small footprint, works identically in Safari (iOS) and Chrome (Android) |
 | QR scanning | [html5-qrcode](https://github.com/mebjas/html5-qrcode) (CDN) | Uses the phone camera directly in the browser, no native app needed |
 | Backend | Node.js + Express (ES modules) | Single process serves both the API and the frontend |
-| Database | **MongoDB — Agent + Visit only** | See "Where data lives" below |
+| Database | **MongoDB — Agent only** | See "Where data lives" below |
 | Photo/signature storage | **Cloudinary** | Direct browser upload, CDN URL back, no server-side file handling |
 | Salesforce link | OAuth 2.0 **JWT Bearer flow**, server-to-server | No agent ever enters Salesforce credentials |
 | Login | Custom username/password (bcrypt + JWT), admin-provisioned only | No public sign-up route exists |
 
 ### Where data lives
 
-By design, MongoDB only holds **field-person data** — proof of who visited
-a store, when, and from where:
-- `Agent` — login credentials (admin-provisioned, see §5).
-- `Visit` — one record per store visit: selfie URL, GPS, device info,
-  signature, timestamps.
+By design, MongoDB holds **exactly one thing**: `Agent` login credentials
+(admin-provisioned, see §5). That's the entire collection list.
+
+Visit data (selfie URL, GPS, device info, signature URL, timestamps) used
+to live in a Mongo `Visit` collection; it's since moved to `Agent_Visit__c`
+**in Salesforce** — created the moment a visit starts, updated to
+`Completed` when the agent signs off. Its Salesforce Id *is* the `visitId`
+the frontend carries for the rest of the visit; there's no Mongo document
+behind it to keep in sync.
 
 Everything about the racks themselves — verification status, who last
-verified a rack, discrepancies — is written **directly to Salesforce** and
-never duplicated in Mongo. There's no `RackScan` or `Discrepancy` collection
-on purpose. If you ever want a scan-by-scan audit log independent of
-Salesforce, that would mean reintroducing a Mongo collection for it — ask
-and I'll add it back.
+verified a rack, discrepancies — is also written **directly to Salesforce**
+(`Account_Rack__c` and `Rack_Report__c`) and never duplicated in Mongo.
+There's no `RackScan` or `Discrepancy` collection on purpose. If you ever
+want a scan-by-scan audit log independent of Salesforce, that would mean
+reintroducing a Mongo collection for it — ask and I'll add it back.
 
 ### Blind verification
 
@@ -67,20 +71,34 @@ manual code-entry fallback in the UI — camera only.
   figure out which rack (if any) the code belongs to.
 
 Both share the same outcome handling in `routes/racks.js`
-(`resolveScan()`): `verified`, `already_verified`, `mismatch`, or
-`inactive_blocked`. `scan-any` has one extra possible outcome, `unknown`,
+(`resolveScan()`): `already_flagged` (a locked `Issue`/`Inactive Rack
+Flagged` status — only Salesforce can clear it), `lifecycle_mismatch`,
+`already_verified`, `already_resolved` (a `Resolved` rack scanned again —
+shown as "already resolved" rather than silently rewritten back to
+`Verified`), `verified`, or `mismatch` (scanned a code that belongs to a
+different real rack — the agent gets a "Scan again / Report" choice, not
+an automatic report). `scan-any` has one extra possible outcome, `unknown`,
 for a code that doesn't belong to any rack on that store's list at all.
 
-### Inactive racks are handled automatically, not via the report form
+### A rack whose lifecycle status isn't Active — the agent decides, nothing writes automatically
 
-If a scanned code correctly matches a rack, but Salesforce has that rack
-marked `isActive: false`, the app doesn't ask the agent anything — it's a
-data-integrity issue, not something a field agent should resolve on the
-spot. The server immediately writes a distinct status
-(`"Flagged - Inactive Rack"` — confirm this exact value exists in your
-`Status__c` picklist, or tell me the one you'd rather use) and shows the
-agent a plain "flagged automatically" result screen. Your own Salesforce
-Flow/automation is expected to take it from there.
+If a scanned code correctly matches a rack, but that rack's `Status__c`
+(lifecycle) isn't `Active` — it's `Retired`, `Pending`, or `New Request` —
+the app does **not** silently write anything or silently accept it as
+verified either. The agent scanned it correctly and it's physically there,
+so this is presented as a heads-up ("Salesforce shows this rack's status as
+'Retired', not Active — would you like to report this?"), not an error.
+They can tap **Report this rack** (opens the report screen, pre-filled
+with a sensible reason/description they can still edit, and submitting it
+writes `Inactive Rack Flagged` specifically — distinct from a plain
+`Issue` — if they escalate) or **Scan again** (does nothing, no write at
+all, same as any other skipped mismatch).
+
+Separately, checklist rows for racks that aren't `Active` are shown
+dimmed and non-tappable, labeled with their actual lifecycle value
+(`Retired`/`Pending`/`New Request`) rather than a generic "Inactive" — so
+the agent can see at a glance why a rack isn't expected to be scanned via
+the normal tap-a-rack flow. They're still reachable through **Quick Scan**, which is what triggers the flow above.
 
 ### Confirm-before-leaving
 
@@ -89,7 +107,11 @@ succeeds), the back button and tab close/refresh are intercepted with a
 confirmation prompt, since navigating away mid-visit could lose progress.
 It's released again once the visit is completed or the agent logs out.
 See `public/js/guard.js` — this is a best-effort standard SPA pattern, not
-a hard guarantee across every browser.
+a hard guarantee across every browser. Within the app itself, the
+signature screen also has a plain "Go back and keep scanning" button, in
+case "Finish visit anyway" was tapped by mistake — nothing about the
+racks already scanned is affected either way, since that's tracked
+independently of which screen is showing.
 
 ### Install prompt
 
@@ -105,13 +127,13 @@ all — there's no programmatic install API on iOS — so it instead shows
 ```
 rack-audit-app/
   api/index.js            Vercel serverless entry — imports server/app.js
-  vercel.json              routes /api/* to api/index.js; /public served statically by Vercel
+  vercel.json              one rewrite: /api/* → /api/index (see §6 for why not the legacy builds/routes format)
   package.json             root deps (ESM), used by Vercel to build api/index.js
   server/                 Express API — all ES modules
     app.js                  the actual Express app (routes, middleware) — imported by both server.js and api/index.js
     server.js               entry point for traditional hosts (Render/Railway/local) — just calls app.listen()
     config/                db.js (cached Mongo connection), cloudinary.js
-    models/                Agent, Visit — the ONLY two Mongo collections (see §1)
+    models/                Agent — the ONLY Mongo collection (see §1)
     services/
       salesforceService.js  the only file that talks to Salesforce / knows a rack's real QR code
       uploadService.js      Cloudinary uploads
@@ -169,6 +191,47 @@ these, send me the real name and I'll swap it in.
 Also confirm the **Store** object — `searchStores()` queries `Account` with a
 `Store_Number__c` field; adjust it if stores live elsewhere.
 
+Two more custom objects hold everything about a visit itself — neither
+exists in MongoDB (see §1):
+
+**`Agent_Visit__c`** — one record per visit, created at `/start-visit` and
+updated to `Completed` at sign-off:
+
+| Field API name | Written | When |
+|---|---|---|
+| `Store__c` | Lookup(Account) | at creation |
+| `Agent_Name__c` / `Agent_Email__c` | Text/Email | at creation |
+| `Visit_Status__c` | Picklist (`In Progress` → `Completed`) | at creation, then again at completion |
+| `Visit_Started__c` / `Visit_Completed__c` | DateTime | at creation / at completion |
+| `Selfie_Photo_URL__c` | URL (Cloudinary) | at creation, if a selfie was captured |
+| `Start_Latitude__c` / `Start_Longitude__c` / `Location_Accuracy_Meters__c` | Number | at creation, if geolocation succeeded |
+| `Device_Info__c` | Text | at creation, if device info was captured — **ASSUMPTION FLAGGED**: this reads as a single text field on the layout, so the device object is JSON-encoded into it (truncated to 255 chars) rather than split across several fields. If there are actually separate fields for platform/browser/etc., tell me their API names and this gets split out properly. |
+| `Signature_Photo_URL__c` | URL (Cloudinary) | at completion |
+| `Signed_By__c` / `Signed_At__c` | Text/DateTime | at completion |
+
+**`Rack_Report__c`** — one record per `/report` submission (a mismatch, a
+lifecycle flag, a resolved issue, or a code that didn't match any rack at
+all):
+
+| Field API name | Written | Notes |
+|---|---|---|
+| `Store__c` | Lookup(Account) | always |
+| `Reason__c` | Text | free text the agent types (e.g. "Rack is missing," "wrong location") — the form's `reportReason` field is a plain text input, not a dropdown |
+| `Description__c` | Text | the agent's free-text notes |
+| `Photo_URL__c` | URL (Cloudinary) | if a photo was attached (required by the form — see below) |
+| `Reported_By_Name__c` / `Reported_By_Email__c` | Text/Email | the logged-in agent |
+| `Reported_At__c` | DateTime | always |
+| `Related_Account_Rack__c` | Lookup(Account_Rack__c) | only when the report is tied to a specific rack (absent for an unmatched-code report) |
+| `Scanned_Code__c` | Text | the code actually scanned, if any |
+| `Agent_Visit__c` | Lookup(Agent_Visit__c) | ties the report back to the visit it happened during |
+| `Resolution__c` | Picklist | **ASSUMPTION FLAGGED**: the only confirmed value seen so far is `"Escalated"`. `"Resolved On The Spot"` (used when the agent picks "I resolved this issue") is a reasonable mirror but hasn't been confirmed against the real picklist — if it rejects with an `INVALID_FIELD_FOR_INSERT_UPDATE`/picklist error, send me the exact accepted values. |
+
+When a report is tied to a rack, the `Account_Rack__c` status write and the
+`Rack_Report__c` create happen as **one atomic Salesforce composite API
+call** (`allOrNone: true`) — you can never end up with a rack marked
+`Issue` with no report behind it, or a report with no status change, one
+succeeding without the other.
+
 ### 3.2 Connected App (JWT Bearer flow)
 
 1. Generate a private key + self-signed certificate:
@@ -196,42 +259,63 @@ Use `npm run diagnose:sf` (or `node scripts/testSalesforceAuth.js` from
 ### 3.3 Notifications — Salesforce owns this, not the app
 
 Per your direction, the app does **not** send email or create Salesforce
-Tasks itself. It only ever writes `Verification_Status__c` (and the two
-`Last_Verified_*` fields); your own Salesforce Flow/automation is expected
-to react to that field changing and handle Case creation, emails, and
-alerts. `emailService.js` still exists but is unused — nothing calls it.
+Tasks itself. Every write goes to `Account_Rack__c`'s `Verification_Status__c`
+(plus the two `Last_Verified_*` fields) and/or a new `Rack_Report__c`
+record (§3.1) — your own Salesforce Flow/automation is expected to react to
+those and handle Case creation, emails, and alerts. `emailService.js` still
+exists but is unused — nothing calls it.
 
-**When that write actually happens is deliberately not "every scan":**
-- A clean match → written immediately (`Verified`).
-- A rack Salesforce marks inactive → written immediately (`Inactive Rack
-  Flagged`) — this is a system-detected condition, not a judgment call, so
-  there's nothing to wait on.
-- A mismatch → **nothing is written yet.** The agent might scan a
-  different rack next, or realize their own mistake, before ever deciding
-  it's worth reporting. Only submitting the report screen (either "Save —
-  I resolved this issue" → `Resolved`, or "Report issue" → `Issue`) writes
-  anything. This is what keeps a run of failed scan attempts from
-  triggering your Salesforce automation on every single one of them.
+**When each write actually happens is deliberately not "every scan":**
+- A clean match → `Account_Rack__c.Verification_Status__c` written
+  immediately as `Verified`. Nothing left to decide, so there's nothing to
+  wait on.
+- A rack Salesforce shows as not `Active` (`Retired`/`Pending`/`New
+  Request`), scanned with a matching code → **nothing is written yet.**
+  This is presented to the agent as a heads-up, not an error — only if
+  they tap "Report this rack" and submit does it write
+  `Inactive Rack Flagged` (plus a `Rack_Report__c`); tapping "Scan again"
+  writes nothing at all.
+- A mismatch (wrong rack scanned) → **nothing is written yet** either. The
+  agent might scan a different rack next, or realize their own mistake,
+  before ever deciding it's worth reporting. Only submitting the report
+  screen (either "Save — I resolved this issue" → `Resolved`, or "Report
+  issue" → `Issue`) writes anything. This is what keeps a run of failed
+  scan attempts from triggering your Salesforce automation on every single
+  one of them.
+- A scanned code that doesn't belong to any rack on the store's list at
+  all → there's no `Account_Rack__c` to write a status to regardless; if
+  the agent reports it, a standalone `Rack_Report__c` is still created
+  (photo, reason, notes, who/when), just with no `Related_Account_Rack__c`
+  lookup populated.
 - Once a rack is `Issue` or `Inactive Rack Flagged`, the app will never
   silently change it again just because a later scan happens to match —
   only clearing it in Salesforce directly (by an admin/manager) does that.
-  Scanning a locked rack returns an `already_flagged` result instead.
+  Scanning a locked rack returns an `already_flagged` result instead, with
+  no write at all.
+- A rack that's `Resolved`, scanned again with a matching code → also
+  **no write** — it's shown as "already resolved" instead of being
+  silently flipped back to `Verified` (with a "Report this rack" option in
+  case the same problem has actually recurred).
 
-The report screen requires **both a description and a photo** before it
-can be submitted, whichever button is used — this is enforced client-side
-(for immediate feedback) and again server-side (as a backstop).
+The report screen requires a reason, a description, **and** a photo
+before it can be submitted, whichever button is used. Client-side
+(`validateReportForm()` in `app.js`) checks all three, for immediate
+feedback. The server-side backstop (`POST /api/racks/report` in
+`racks.js`) only re-checks the description and photo — it doesn't require
+`reason` to be non-empty. That's a real gap if `/report` is ever called
+directly rather than through this UI (the frontend always sends a reason,
+so it doesn't surface in normal use), worth closing if you build a second
+client against this API.
 
-One open gap: the report's **notes and reason** currently have nowhere to
-go in Salesforce (no confirmed field for them yet — the "Comments" field
-seen in your record screenshots is a candidate, but I don't have its API
-name). The photo still uploads to Cloudinary either way (so it's not
-lost), and for the one case with no matching rack at all (a scanned code
-that doesn't belong to any rack on the store's list), there's no
-`Account_Rack__c` to write anything to regardless — that report is
-captured (photo + reason) but not linked to any Salesforce record. Tell me
-the Comments field's API name, and separately whether you want that
-unlinked case to create something in Salesforce (e.g. a Case on the
-Account) and which object/fields to use, and I'll wire both in.
+**One more timing detail, since it's easy to assume otherwise:** GPS and
+device info are captured once, at `/start-visit`, and written to
+`Agent_Visit__c` — not re-captured on every scan. The frontend *does*
+attach a fresh `geo` reading to every `/scan` and `/scan-any` request too
+(see `Api.scanRack()`/`Api.scanAnyRack()` in `public/js/api.js`), but
+`resolveScan()` currently never reads `req.body.geo` — it's accepted and
+silently ignored server-side. If you want a per-scan location trail later,
+that's a small server-side change (nothing needs to change on the
+frontend, since it's already sending the data).
 
 ---
 
@@ -260,20 +344,44 @@ geolocation need HTTPS or `localhost` to work, so for real-phone testing
 over LAN you'll need a tunnel (e.g. `ngrok http 4000`) or a deployed URL.
 
 Log in with `jsmith` / `ChangeMe123!`, take a selfie, and search store
-`4021` or `4088` — those are the two mock stores in
-`server/services/mockData.js`. Store 4021 includes one **inactive** rack
-(`RACK-4021-05`, Bakery · Bay 2) specifically so you can test the
-auto-flag behavior: it shows dimmed and non-tappable in the checklist, but
-using **Quick scan — any rack** and scanning its correct code will still
-trigger the "flagged automatically" result.
+`4021`, `4088`, or `4099` (try `"riverside"` to see the multi-result store
+list) — see `server/services/mockData.js` for the full mock catalog. Store
+4021 in particular is built for testing every status case at once:
+- `RACK-4021-04` starts pre-flagged `Issue` — confirms the checklist shows
+  "Issue Raised" immediately, not "Pending" until rescanned.
+- `RACK-4021-05` is `Retired` and `RACK-4021-06` is `Pending` — both show
+  dimmed and non-tappable in the checklist with their specific lifecycle
+  label, but scanning either one's correct code via **Quick Scan**
+  triggers the "Report this rack?" prompt.
+- Store 4088 also has one `New Request` rack (`RACK-4088-04`) for the
+  third lifecycle value.
 
 ## 6. Deploying to Vercel
 
 The project is already structured for this — `api/index.js` exports the
-Express app directly (Vercel treats it as a serverless function), and
-`vercel.json` routes only `/api/*` requests to it. Everything under
-`/public` is served automatically by Vercel's static hosting and never
-touches the function.
+Express app directly (Vercel's Node.js runtime treats it as a serverless
+function automatically, with no config needed to make Vercel *find* it),
+and `vercel.json` adds one **rewrite** so a request to `/api/anything`
+resolves to that function:
+
+```json
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" }
+  ]
+}
+```
+
+Everything under `/public` is served automatically by Vercel's static
+hosting and never touches the function at all.
+
+> **If you hand-write a different `vercel.json`, avoid the legacy
+> `builds`/`routes` keys** (`{ "builds": [...], "routes": [...] }`) —
+> that format predates Vercel's zero-config `/api` detection and the two
+> can conflict, which is what caused this project's deploy to fail before
+> it was switched to `rewrites`. `rewrites` (shown above) works *with*
+> the auto-detected function instead of trying to redefine it.
 
 1. Push the repo (as-is, including the root `package.json`, `api/`, and
    `vercel.json`) to GitHub and import it in Vercel, or run `vercel` from
@@ -319,21 +427,28 @@ touches the function.
 preview for the front camera), store search with a real list of matches,
 rack checklist from Salesforce (or mock) with no codes ever sent to the
 browser, both scan modes, rack dimensions shown on a "Verified" result,
-inactive-rack auto-flagging, the report form (reason picklist + custom
-text, mandatory photo + description, resolve/escalate branching), an
-already-flagged guard so the app can never silently overwrite an open
-Issue, deferred Salesforce writes (a mismatch only gets written once the
-agent makes a final decision, not on every attempt), signature capture,
-GPS + timestamp + device info before every scan, a custom confirm dialog
-with explicit button labels, confirm-before-leaving mid-visit, installable
-PWA with a real install prompt, full ES-module codebase front and back.
+lifecycle-mismatch detection that asks the agent rather than writing
+anything automatically, the report form (free-text reason field, mandatory
+description and photo, resolve/escalate branching) writing a full
+`Rack_Report__c` record — including for a scanned code that doesn't match
+any rack at all — atomically alongside the `Account_Rack__c` status update
+when one applies, an already-flagged guard so the app can never silently
+overwrite an open Issue, an already-resolved guard so a `Resolved` rack
+can't get silently flipped back to `Verified` either, deferred Salesforce
+writes (a mismatch only gets written once the agent makes a final
+decision, not on every attempt), signature capture, GPS + timestamp +
+device info captured once per visit and written to `Agent_Visit__c`
+(see the note at the end of §3.3), a custom confirm dialog with
+explicit button labels, confirm-before-leaving mid-visit, installable PWA
+with a real install prompt, full ES-module codebase front and back
+including the Vercel deploy path.
 
 **Needs your input before going live:**
 - `Rack__c`'s dimension field API names (§3.1) — currently assumed, not
   confirmed the way `Account_Rack__c`'s were.
-- The "Comments" field's API name, if you want report notes/reason
-  persisted in Salesforce (§3.3).
-- Whether an unmatched-code report (no rack found at all) should create
-  something in Salesforce, and if so, what (§3.3) — right now it's
-  captured (photo + reason) but not linked to any record.
+- `Agent_Visit__c.Device_Info__c`'s exact shape (§3.1) — assumed to be one
+  JSON-encoded text field; confirm if it's actually several separate
+  fields.
+- `Rack_Report__c.Resolution__c`'s exact accepted picklist values (§3.1) —
+  only `"Escalated"` has been confirmed so far.
 - Real app icons (placeholders are in `public/icons/`).

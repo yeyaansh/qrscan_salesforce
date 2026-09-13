@@ -116,12 +116,14 @@
     <h2 id="checklistStoreName">Store</h2>
     <p class="muted">Tap a rack to scan it directly, or use Quick Scan to scan whatever's in front of you.</p>
 
-    <ul class="rack-list" id="rackList" style="margin-top:14px;"></ul>
+    <div class="rack-list-scroll">
+      <ul class="rack-list" id="rackList"></ul>
+    </div>
 
     <div class="action-bar">
       <button class="btn btn-primary" id="scanNextBtn">Scan next rack</button>
       <div style="height:10px;"></div>
-      <button class="btn btn-secondary" id="openScanBtn">Quick scan — any rack</button>
+      <button class="btn btn-secondary" id="openScanBtn">Quick Scan</button>
       <div style="height:10px;"></div>
       <button class="btn btn-ghost" id="finishVisitBtn">Finish visit</button>
     </div>
@@ -178,37 +180,29 @@
        all (in which case reportRackId is null and there's no "resolved"
        option, since there's no record to mark resolved). -->
   <section class="screen" id="screen-report">
+    <div class="report-header-row">
+      <button class="btn-back-link" id="reportCancelBtn" type="button">‹ Cancel</button>
+    </div>
     <h2 id="reportTitle">Report an issue</h2>
     <p class="muted" id="reportSubtitle">Let us know what you found.</p>
 
+    <div class="form-section-label">What's wrong</div>
     <div class="field">
       <label for="reportReason">Reason</label>
-      <select id="reportReason">
-        <option value="">Select a reason…</option>
-        <option value="Wrong rack found here">Wrong rack found here</option>
-        <option value="Rack is missing">Rack is missing</option>
-        <option value="Rack has moved to a different location">Rack has moved to a different location</option>
-        <option value="Rack dimensions don't match records">Rack dimensions don't match records</option>
-        <option value="QR code damaged or unreadable">QR code damaged or unreadable</option>
-        <option value="other">Other — describe below</option>
-      </select>
+      <input id="reportReason" placeholder="e.g. Rack is missing, wrong location, QR code damaged…" />
     </div>
 
-    <div class="field" id="reportCustomReasonField" style="display:none;">
-      <label for="reportCustomReason">Your own reason</label>
-      <input id="reportCustomReason" placeholder="Describe the reason" />
-    </div>
-
-    <div class="field">
+    <div class="field" style="margin-bottom:20px;">
       <label for="reportNotes">Description <span class="required-mark">*</span></label>
       <textarea id="reportNotes" placeholder="What did you find? What did you do about it?"></textarea>
     </div>
 
+    <div class="form-section-label">Evidence</div>
     <div class="camera-wrap" id="reportCameraWrap" style="max-height:220px; display:none;">
       <video id="reportVideo" playsinline muted></video>
       <img id="reportPreview" style="display:none; width:100%; height:100%; object-fit:cover;" />
     </div>
-    <button class="btn btn-secondary" id="reportPhotoBtn" style="margin-top:10px;">Attach a photo <span class="required-mark">*</span></button>
+    <button class="btn btn-secondary" id="reportPhotoBtn" style="margin-top:4px;">Attach a photo <span class="required-mark">*</span></button>
     <div class="error-text" id="reportError"></div>
 
     <div class="action-bar">
@@ -228,6 +222,8 @@
 
     <div class="action-bar">
       <button class="btn btn-primary" id="signatureSubmitBtn">Complete visit</button>
+      <div style="height:10px;"></div>
+      <button class="btn btn-ghost" id="signatureBackBtn">Go back and keep scanning</button>
     </div>
   </section>
 

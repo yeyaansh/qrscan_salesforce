@@ -295,6 +295,17 @@ async function selectStoreAndStartVisit(store, rowElement, listElement) {
 
   try {
     const geo = await Geo.capture();
+
+    // Start_Latitude__c / Start_Longitude__c are REQUIRED fields on
+    // Agent_Visit__c in Salesforce — a visit literally cannot be created
+    // without them, so this can no longer be treated as "proceed without
+    // location if denied" the way it used to be. Stopping here (before
+    // even uploading the selfie) avoids burning that upload + a failed
+    // Salesforce create just to find out the same thing a second later.
+    if (!geo || geo.lat === undefined || geo.lat === null || geo.lng === undefined || geo.lng === null) {
+      throw new Error("Location access is required to start a visit. Please enable location permissions for this site and try again.");
+    }
+
     warnIfLocationIsImprecise(geo);
     const result = await Api.startVisit({
       storeId: store.storeId,
@@ -307,10 +318,10 @@ async function selectStoreAndStartVisit(store, rowElement, listElement) {
 
     const racksWithScanStatus = [];
     for (const rack of result.racks) {
-      const rackWithStatus = { ...rack, scanStatus: "pending" };
+      const rackWithStatus = { ...rack, scanStatus: mapSalesforceStatusToScanStatus(rack.status) };
       racksWithScanStatus.push(rackWithStatus);
     }
-    State.patch({ visitId: result.visit._id, racks: racksWithScanStatus });
+    State.patch({ visitId: result.visitId, racks: racksWithScanStatus });
 
     NavGuard.enable(); // a visit is now genuinely in progress — warn before losing it
     renderChecklist();
@@ -330,16 +341,57 @@ async function selectStoreAndStartVisit(store, rowElement, listElement) {
 
 // ── CHECKLIST ────────────────────────────────────────────────────────────
 
+// Translates Salesforce's Verification_Status__c value into the app's own
+// scanStatus, used to seed the checklist when a visit starts. Without
+// this, every rack would show as "Pending" regardless of whether a
+// previous visit had already flagged it as Verified/Issue/Resolved —
+// the checklist needs to reflect reality from the moment it loads, not
+// only after this agent personally rescans something.
+function mapSalesforceStatusToScanStatus(salesforceStatus) {
+  if (salesforceStatus === "Verified") {
+    return "verified";
+  }
+  if (salesforceStatus === "Issue" || salesforceStatus === "Inactive Rack Flagged") {
+    return "issue";
+  }
+  if (salesforceStatus === "Resolved") {
+    return "resolved";
+  }
+  // Covers "Not Verified", blank, or anything unrecognized. This MUST be
+  // the string "pending" — every other check in this file (the done
+  // counter, "scan next rack", and the finish-visit guard below) compares
+  // against rack.scanStatus === "pending" to decide what's left to do. If
+  // this ever returns a display label like "Scan Me" instead of the
+  // status code, those checks silently stop matching newly-loaded racks:
+  // the done count looks wrong, "scan next" can't find anything to scan,
+  // and — worst of all — finishVisitBtn's pending-count check below always
+  // sees zero pending racks and skips straight to signature, even if
+  // nothing has been scanned at all. The "Scan Me" label itself is applied
+  // separately, in getRackDisplayState().
+  return "pending";
+}
+
 // Works out which CSS class and which label to show for one rack row,
 // based on whether it's active and what's happened with it so far this
 // visit. Written as explicit if/else steps (rather than a compact lookup
 // table) so each case is easy to find and change independently.
 function getRackDisplayState(rack) {
   if (rack.isActive === false) {
-    return { cssClass: "inactive", label: "Inactive" };
+    // Show the SPECIFIC lifecycle reason (Retired/Pending/New Request)
+    // rather than a generic "Inactive" — the agent should be able to tell
+    // at a glance why this rack isn't expected to be scanned.
+    let label = "Inactive";
+    if (rack.lifecycleStatus) {
+      label = rack.lifecycleStatus;
+    }
+    return { cssClass: "inactive", label: label };
   }
   if (rack.scanStatus === "pending") {
-    return { cssClass: "", label: "Pending" };
+    // cssClass "pending" (not "") so this picks up the .tag-state.pending
+    // styling that already exists in style.css — it was defined but never
+    // actually reachable while scanStatus defaulted to the display string
+    // "Scan Me" instead of the status code "pending".
+    return { cssClass: "pending", label: "Scan Me" };
   }
   if (rack.scanStatus === "verified") {
     return { cssClass: "verified", label: "Verified" };
@@ -369,9 +421,39 @@ function renderChecklist() {
       '<div><div class="rack-label-main">' + rack.label + "</div></div>" +
       '<span class="tag-state ' + displayState.cssClass + '">' + displayState.label + "</span>";
 
+    // Statuses where scanning again literally cannot change anything:
+    // "verified" is already checked off, "issue" can only be cleared by a
+    // human in Salesforce (the agent scanning it again won't do that), and
+    // "resolved" was already closed out earlier this same visit. Tapping
+    // any of these used to open the camera and go all the way through a
+    // real scan API call just to be told "nothing to do here" — blocking
+    // the tap itself, before the camera even opens, means that round trip
+    // never happens at all. (This is separate from "Scan Any Rack": there
+    // the server genuinely doesn't know which rack a code belongs to until
+    // it looks it up, so that one read is unavoidable — see racks.js —
+    // but this checklist tap already KNOWS the outcome from data already
+    // on the screen, so there's nothing to look up.)
+    const isLocked = rack.scanStatus === "verified" || rack.scanStatus === "issue" || rack.scanStatus === "resolved";
+
     if (rack.isActive === false) {
       row.addEventListener("click", function () {
-        toast("Salesforce marks this rack inactive — it won't be requested for scanning.");
+        let statusText = "inactive";
+        if (rack.lifecycleStatus) {
+          statusText = "marked " + rack.lifecycleStatus;
+        }
+        toast("This rack is " + statusText + " in Salesforce — it won't be requested for scanning here.");
+      });
+    } else if (isLocked) {
+      row.addEventListener("click", function () {
+        let message;
+        if (rack.scanStatus === "verified") {
+          message = rack.label + " is already verified — no need to scan it again.";
+        } else if (rack.scanStatus === "issue") {
+          message = rack.label + " has an open issue in Salesforce. Only a manager or admin can clear it there — scanning it again won't change that.";
+        } else {
+          message = rack.label + " was already resolved on this visit.";
+        }
+        toast(message);
       });
     } else {
       row.addEventListener("click", function () {
@@ -408,16 +490,39 @@ $("openScanBtn").addEventListener("click", function () {
 
 $("finishVisitBtn").addEventListener("click", function () {
   const racks = State.get("racks") || [];
-  let pendingCount = 0;
+  const pendingRacks = [];
   for (const rack of racks) {
     if (rack.scanStatus === "pending" && rack.isActive !== false) {
-      pendingCount = pendingCount + 1;
+      pendingRacks.push(rack);
     }
   }
 
-  if (pendingCount > 0) {
+  if (pendingRacks.length > 0) {
+    // Always name a few actual racks — "Rack A, Rack B haven't been
+    // scanned yet" tells the agent exactly what to go do, instead of
+    // leaving them to hunt through the checklist for whichever ones a
+    // bare count refers to. But NEVER enumerate the whole list: with a
+    // store that has hundreds of racks, spelling out every single pending
+    // label would turn this modal into an unreadable wall of text (and
+    // overflow the modal box itself). So: name up to the first 3, and
+    // fold everything past that into "and N more" — readable at 1 pending
+    // rack, still readable at 500.
+    const MAX_NAMES_TO_LIST = 3;
+    let whatsLeft;
+    if (pendingRacks.length === 1) {
+      whatsLeft = pendingRacks[0].label + " hasn't been scanned yet.";
+    } else if (pendingRacks.length <= MAX_NAMES_TO_LIST) {
+      const names = pendingRacks.map((r) => r.label).join(", ");
+      whatsLeft = names + " haven't been scanned yet.";
+    } else {
+      const namedRacks = pendingRacks.slice(0, MAX_NAMES_TO_LIST);
+      const remainingCount = pendingRacks.length - MAX_NAMES_TO_LIST;
+      const names = namedRacks.map((r) => r.label).join(", ");
+      whatsLeft = names + ", and " + remainingCount + " more, haven't been scanned yet.";
+    }
+
     showConfirmModal({
-      message: pendingCount + " rack(s) haven't been scanned yet. If you finish now, they'll stay unverified until your next visit here.",
+      message: whatsLeft + " If you finish now, they'll stay unverified until your next visit here.",
       confirmLabel: "Finish visit anyway",
       cancelLabel: "Go back and keep scanning",
       onConfirm: goToSignature,
@@ -569,9 +674,17 @@ function applyScanOutcome(result, scannedCode) {
     if (localRack !== null) {
       if (outcome === "verified") {
         localRack.scanStatus = "verified";
-      } else if (outcome === "inactive_blocked" || outcome === "already_flagged") {
+      } else if (outcome === "already_flagged") {
         localRack.scanStatus = "issue";
       }
+      // Deliberately NOT touching localRack.scanStatus for "lifecycle_mismatch"
+      // or "mismatch" — nothing has been written to Salesforce yet for
+      // either, so the checklist should keep showing "Pending" until the
+      // agent actually submits a report (see submitReport()).
+      // Also nothing to do for "already_resolved": localRack.scanStatus was
+      // already seeded as "resolved" when the checklist loaded (see
+      // mapSalesforceStatusToScanStatus), and this outcome confirms nothing
+      // changed server-side either.
       State.set("racks", racks);
 
       // Refresh the top "x/y done" counter right now — not just when the
@@ -654,6 +767,29 @@ function applyScanOutcome(result, scannedCode) {
     return;
   }
 
+  if (outcome === "already_resolved") {
+    let subtitle = "This rack's issue was already marked resolved.";
+    if (rack) {
+      subtitle = rack.label + " was already marked resolved. Scanning it again won't change that.";
+    }
+    showResult({
+      tone: "info",
+      glyph: "i",
+      title: "Already resolved",
+      subtitle: subtitle,
+      primaryLabel: "Back to checklist",
+      onPrimary: backToChecklist,
+      // In case the same problem has come back since it was marked
+      // resolved, this still lets the agent raise it again rather than
+      // being stuck with no way forward except leaving it alone.
+      secondaryLabel: "Report this rack",
+      onSecondary: function () {
+        goToReport(rack, scannedCode);
+      },
+    });
+    return;
+  }
+
   if (outcome === "already_flagged") {
     showResult({
       tone: "warning",
@@ -666,14 +802,32 @@ function applyScanOutcome(result, scannedCode) {
     return;
   }
 
-  if (outcome === "inactive_blocked") {
+  if (outcome === "lifecycle_mismatch") {
+    let statusText = "not Active";
+    if (rack && rack.lifecycleStatus) {
+      statusText = "'" + rack.lifecycleStatus + "', not Active";
+    }
     showResult({
       tone: "warning",
       glyph: "!",
-      title: "Flagged automatically",
-      subtitle: "Salesforce marks this rack inactive. It's been flagged there directly — no action needed from you.",
-      primaryLabel: "Back to checklist",
-      onPrimary: backToChecklist,
+      title: "Status doesn't match",
+      subtitle: "Salesforce shows this rack's status as " + statusText + " — but it scanned correctly and is physically here. Would you like to report this?",
+      primaryLabel: "Report this rack",
+      onPrimary: function () {
+        let statusForNotes = "not Active";
+        if (rack && rack.lifecycleStatus) {
+          statusForNotes = "'" + rack.lifecycleStatus + "'";
+        }
+        goToReport(rack, scannedCode, {
+          reason: "Rack status in Salesforce doesn't match what's here",
+          notes: "Salesforce shows this rack's status as " + statusForNotes + ", but it was found and scanned successfully at this location.",
+          escalateStatus: "Inactive Rack Flagged",
+        });
+      },
+      secondaryLabel: "Scan again",
+      onSecondary: function () {
+        goToScan({ mode: "any" });
+      },
     });
     return;
   }
@@ -697,7 +851,35 @@ function applyScanOutcome(result, scannedCode) {
   }
 
   if (outcome === "mismatch") {
-    goToReport(rack, scannedCode);
+    // This is "Scan Individual Rack" scanning a code that belongs to some
+    // OTHER real rack at the store — not the one the agent tapped/was
+    // asked to verify. That's still a meaningful finding (wrong rack in
+    // this spot, or the agent grabbed the wrong QR sticker), but it's not
+    // automatically a reportable issue: the far more common case is the
+    // agent simply scanned the wrong code by mistake and just needs to
+    // try again. Jumping straight into the Report screen for every one of
+    // those forces a full report (photo + notes) to get back out, and
+    // trains agents to file junk reports just to escape the screen. So —
+    // same pattern as "unknown" above — stop and let the agent choose
+    // instead of deciding for them.
+    let subtitle = "The code you scanned belongs to a different rack, not the one you're verifying.";
+    if (rack && rack.label) {
+      subtitle = "The code you scanned doesn't match " + rack.label + " — it belongs to a different rack.";
+    }
+    showResult({
+      tone: "warning",
+      glyph: "!",
+      title: "Wrong rack scanned",
+      subtitle: subtitle,
+      primaryLabel: "Scan again",
+      onPrimary: function () {
+        goToScan({ rackId: rack ? rack.id : null });
+      },
+      secondaryLabel: "Report",
+      onSecondary: function () {
+        goToReport(rack, scannedCode);
+      },
+    });
     return;
   }
 }
@@ -740,14 +922,38 @@ $("scanCancelBtn").addEventListener("click", async function () {
 // any rack at all (rack is null in that last case — there's no record to
 // mark "resolved", so that button is hidden).
 
-function goToReport(rack, scannedCode) {
+function goToReport(rack, scannedCode, prefill) {
   const rackId = rack ? rack.id : null;
-  State.patch({ reportRackId: rackId, reportPhoto: null });
 
-  $("reportReason").value = "";
-  $("reportCustomReasonField").style.display = "none";
-  $("reportCustomReason").value = "";
-  $("reportNotes").value = "";
+  let prefillReason = "";
+  let prefillNotes = "";
+  let prefillEscalateStatus = null;
+  if (prefill) {
+    if (prefill.reason) {
+      prefillReason = prefill.reason;
+    }
+    if (prefill.notes) {
+      prefillNotes = prefill.notes;
+    }
+    if (prefill.escalateStatus) {
+      prefillEscalateStatus = prefill.escalateStatus;
+    }
+  }
+
+  // scannedCode was previously received here and never stored anywhere —
+  // it got lost between the scan screen and the report submission, so
+  // Rack_Report__c.Scanned_Code__c had nothing to write. Keeping it in
+  // State like everything else this screen needs (reportRackId,
+  // reportPhoto, ...) so submitReport() below can send it along.
+  State.patch({
+    reportRackId: rackId,
+    reportScannedCode: scannedCode || null,
+    reportPhoto: null,
+    reportEscalateStatus: prefillEscalateStatus,
+  });
+
+  $("reportReason").value = prefillReason;
+  $("reportNotes").value = prefillNotes;
   $("reportError").textContent = "";
   $("reportCameraWrap").style.display = "none";
   $("reportPreview").style.display = "none";
@@ -755,7 +961,7 @@ function goToReport(rack, scannedCode) {
 
   if (rack) {
     $("reportTitle").textContent = "Report an issue";
-    $("reportSubtitle").textContent = rack.label + " — let us know what you found.";
+    $("reportSubtitle").textContent = rack.label + " — let us know what you found. A photo is still required, but feel free to edit the details below.";
   } else {
     $("reportTitle").textContent = "Report this code";
     $("reportSubtitle").textContent = "This code didn't match any rack expected at this store.";
@@ -771,14 +977,6 @@ function goToReport(rack, scannedCode) {
 
   showScreen("screen-report");
 }
-
-$("reportReason").addEventListener("change", function () {
-  if ($("reportReason").value === "other") {
-    $("reportCustomReasonField").style.display = "block";
-  } else {
-    $("reportCustomReasonField").style.display = "none";
-  }
-});
 
 $("reportPhotoBtn").addEventListener("click", async function () {
   const alreadyHavePhoto = State.get("reportPhoto") !== null && State.get("reportPhoto") !== undefined;
@@ -818,16 +1016,12 @@ $("reportPhotoBtn").addEventListener("click", async function () {
 // photo — this is checked here (so the person gets an immediate, specific
 // answer about what's missing) and again on the server as a backstop.
 function validateReportForm() {
-  const reasonSelectValue = $("reportReason").value;
-  const customReasonValue = $("reportCustomReason").value.trim();
+  const reasonValue = $("reportReason").value.trim();
   const notesValue = $("reportNotes").value.trim();
   const hasPhoto = State.get("reportPhoto") !== null && State.get("reportPhoto") !== undefined;
 
-  if (!reasonSelectValue) {
-    return { valid: false, error: "Please choose a reason." };
-  }
-  if (reasonSelectValue === "other" && !customReasonValue) {
-    return { valid: false, error: "Please describe the reason." };
+  if (!reasonValue) {
+    return { valid: false, error: "Please enter a reason." };
   }
   if (!notesValue) {
     return { valid: false, error: "Please add a short description." };
@@ -836,12 +1030,7 @@ function validateReportForm() {
     return { valid: false, error: "A photo is required before this can be submitted." };
   }
 
-  let finalReason = reasonSelectValue;
-  if (reasonSelectValue === "other") {
-    finalReason = customReasonValue;
-  }
-
-  return { valid: true, reason: finalReason, notes: notesValue };
+  return { valid: true, reason: reasonValue, notes: notesValue };
 }
 
 async function submitReport(isResolved, buttonElement, loadingText) {
@@ -867,11 +1056,14 @@ async function submitReport(isResolved, buttonElement, loadingText) {
   try {
     const response = await Api.reportRack({
       storeId: State.get("storeId"),
+      visitId: State.get("visitId"), // lets the server link Rack_Report__c.Agent_Visit__c
       rackId: reportRackId,
+      scannedCode: State.get("reportScannedCode"),
       reason: validation.reason,
       notes: validation.notes,
       photo: State.get("reportPhoto"),
       resolved: isResolved,
+      escalateStatus: State.get("reportEscalateStatus"), // null for a normal report — server defaults to "Issue"
     });
 
     if (localRack !== null) {
@@ -885,8 +1077,11 @@ async function submitReport(isResolved, buttonElement, loadingText) {
 
     Camera.stop();
 
-    if (!response.linkedToSalesforce) {
-      toast("Noted — since this code didn't match a rack, it wasn't linked to a Salesforce record.");
+    // A Rack Report is created in Salesforce either way now — the only
+    // difference is whether it could be linked to a specific
+    // Account_Rack__c (it can't for a code that didn't match anything).
+    if (!response.linkedToRack) {
+      toast("Reported in Salesforce — this code didn't match a rack, so it's logged without one linked.");
     } else if (isResolved) {
       toast("Marked resolved.");
     } else {
@@ -902,6 +1097,40 @@ async function submitReport(isResolved, buttonElement, loadingText) {
     setButtonLoading(buttonElement, false, buttonElement.dataset.originalText);
   }
 }
+
+// Lets the agent back out of this screen without submitting anything —
+// covers both a straight-up misclick (e.g. tapping "Report this rack" by
+// mistake right after a successful verify, with no way back before this)
+// and simply changing their mind partway through filling the form in.
+// Nothing is written to Salesforce until one of the two buttons below is
+// pressed, so there's genuinely nothing to undo — this only ever discards
+// local, unsaved form state.
+$("reportCancelBtn").addEventListener("click", function () {
+  const reasonEntered = $("reportReason").value.trim() !== "";
+  const notesEntered = $("reportNotes").value.trim() !== "";
+  const photoTaken = State.get("reportPhoto") !== null && State.get("reportPhoto") !== undefined;
+  const hasEnteredSomething = reasonEntered || notesEntered || photoTaken;
+
+  function discardAndLeave() {
+    Camera.stop();
+    renderChecklist();
+    showScreen("screen-checklist");
+  }
+
+  if (hasEnteredSomething) {
+    // Only interrupt with a confirmation if there's actually something to
+    // lose — an empty form (the pure-misclick case) should leave instantly.
+    showConfirmModal({
+      message: "Discard this report? Nothing you've entered here will be saved.",
+      confirmLabel: "Discard and go back",
+      cancelLabel: "Keep editing",
+      onConfirm: discardAndLeave,
+    });
+    return;
+  }
+
+  discardAndLeave();
+});
 
 $("reportResolveBtn").addEventListener("click", function () {
   submitReport(true, $("reportResolveBtn"), "Saving…");
@@ -919,6 +1148,16 @@ function goToSignature() {
 
 $("signatureClearBtn").addEventListener("click", function () {
   SignaturePad.clear();
+});
+
+// Lets the agent back out of signing if they ended up here by mistake
+// (e.g. tapped "Finish visit anyway" without meaning to). Nothing about
+// the visit is touched — the racks already scanned stay exactly as they
+// are, since that's all tracked in State independent of which screen is
+// showing, not something goToSignature() ever changes.
+$("signatureBackBtn").addEventListener("click", function () {
+  renderChecklist();
+  showScreen("screen-checklist");
 });
 
 $("signatureSubmitBtn").addEventListener("click", async function () {

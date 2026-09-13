@@ -2,7 +2,6 @@ import express from "express";
 import { requireAuth } from "../middleware/auth.js";
 import * as salesforce from "../services/salesforceService.js";
 import { uploadDataUrl } from "../services/uploadService.js";
-import Visit from "../models/Visit.js";
 
 const router = express.Router();
 
@@ -14,6 +13,7 @@ function convertRackForClient(rack) {
     id: rack.id,
     label: rack.label,
     isActive: rack.isActive,
+    lifecycleStatus: rack.lifecycleStatus,
     status: rack.status,
   };
 }
@@ -40,6 +40,9 @@ router.get("/search", requireAuth, async (req, res) => {
 
 // POST /api/stores/start-visit
 // Body: { storeId, storeNumber, storeName, selfie (dataURL), geo, deviceInfo }
+// Nothing about a visit is kept in Mongo anymore — the Agent_Visit__c
+// created here IS the visit record, and its Salesforce Id IS the visitId
+// the frontend holds onto for the rest of the visit.
 router.post("/start-visit", requireAuth, async (req, res) => {
   const storeId = req.body.storeId;
   const storeNumber = req.body.storeNumber;
@@ -52,24 +55,33 @@ router.post("/start-visit", requireAuth, async (req, res) => {
     res.status(400).json({ error: "storeId, storeNumber and selfie are required" });
     return;
   }
+  // Start_Latitude__c / Start_Longitude__c are required fields on
+  // Agent_Visit__c in Salesforce — enforced here too (not just client-side
+  // in app.js) so this endpoint fails fast with a clear message instead of
+  // uploading the selfie and then getting a REQUIRED_FIELD_MISSING back
+  // from Salesforce after the fact.
+  const hasCoordinates = geo && geo.lat !== undefined && geo.lat !== null && geo.lng !== undefined && geo.lng !== null;
+  if (!hasCoordinates) {
+    res.status(400).json({ error: "Location (lat/lng) is required to start a visit." });
+    return;
+  }
 
   try {
     const selfieUrl = await uploadDataUrl(selfie, "selfies");
 
-    const visit = await Visit.create({
-      agent: req.agent._id,
+    const agentVisit = await salesforce.createAgentVisit({
       storeId: storeId,
-      storeNumber: storeNumber,
-      storeName: storeName,
-      selfieUrl: selfieUrl,
-      selfieGeo: geo,
+      agentName: req.agent.fullName,
+      agentEmail: req.agent.email,
+      geo: geo,
       deviceInfo: deviceInfo,
+      selfiePhotoUrl: selfieUrl,
     });
 
     const racks = await salesforce.getRacksForStore(storeId);
     const racksForClient = racks.map(convertRackForClient);
 
-    res.status(201).json({ visit: visit, racks: racksForClient });
+    res.status(201).json({ visitId: agentVisit.id, racks: racksForClient });
   } catch (err) {
     console.error("[stores:start-visit] storeId=" + storeId + " —", err.message);
     res.status(500).json({ error: "Could not start the visit", detail: err.message });

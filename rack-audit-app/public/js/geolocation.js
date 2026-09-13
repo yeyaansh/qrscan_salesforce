@@ -15,7 +15,13 @@ export const Geo = {
             accuracyMeters: pos.coords.accuracy,
             capturedAt: new Date().toISOString(),
           }),
-        () => resolve(null), // permission denied / unavailable — audit still proceeds, just unflagged
+        // Permission denied / unavailable. NOTE: unlike some other capture
+        // failures in this app, this one is NOT tolerated downstream —
+        // Start_Latitude__c/Start_Longitude__c are required fields on
+        // Salesforce's Agent_Visit__c, so a visit can't be created without
+        // a real location. The caller (app.js) checks for null here and
+        // blocks starting the visit with a clear message instead.
+        () => resolve(null),
         options
       );
     });

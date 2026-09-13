@@ -50,7 +50,27 @@ button, input, select, textarea { font-family: inherit; font-size: 16px; }
 #app {
   max-width: 480px;
   margin: 0 auto;
-  min-height: 100vh;
+  /* Must be a real, capped height — not min-height — or this box can grow
+     taller than one viewport to fit its content, and the WHOLE PAGE
+     scrolls instead of the inner region each screen sets up for itself.
+     That's what was defeating #screen-checklist's "fixed header + fixed
+     action bar, only the list scrolls" layout below: with a large rack
+     list, #app (and everything inside it, since flex:1 on an
+     auto-sized/min-height-only container just shrink-wraps content) grew
+     past 100vh, so the browser scrolled the document and "Scan next
+     rack" / "Quick Scan" / "Finish visit" ended up wherever the list
+     happened to end — sometimes hundreds of rows down. The second
+     `height` line is a progressive-enhancement override for mobile
+     browsers, where 100vh includes space the address bar can be hiding
+     (dvh reflects what's actually visible right now); browsers that
+     don't understand dvh simply ignore that line and keep the 100vh
+     above. `overflow: hidden` is what actually enforces the cap — without
+     it, height alone wouldn't stop content from spilling out and growing
+     the page anyway.
+  */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--paper);
@@ -118,9 +138,54 @@ button, input, select, textarea { font-family: inherit; font-size: 16px; }
   color: var(--text);
 }
 .field textarea { resize: vertical; min-height: 88px; }
-.error-text { color: var(--alert); font-size: 13px; margin-top: -8px; margin-bottom: 12px; min-height: 16px; }
+.field select {
+  width: 100%;
+  border: 1.5px solid var(--line);
+  background-color: var(--card);
+  border-radius: var(--radius);
+  padding: 13px 40px 13px 14px;
+  color: var(--text);
+  font-size: 16px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'><path d='M1 1l6 6 6-6' stroke='%236B6355' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+/* Sits with normal spacing by default. Only pulled snug (cancelling the
+   field's own bottom margin) when it directly follows a .field — e.g. the
+   login/store errors. Anywhere else (after a camera view or a button, like
+   the scan and report screens) it needs its own breathing room instead, or
+   it overlaps whatever's above it. */
+.error-text { color: var(--alert); font-size: 13px; margin-top: 8px; margin-bottom: 12px; min-height: 16px; }
+.field + .error-text { margin-top: -8px; }
 
-/* ── Tag / rack cards ─────────────────────────────────────────── */
+/* ── Checklist screen: fixed header + fixed action bar, ONLY the rack
+   list itself scrolls in between. With 50+ racks the old layout let the
+   whole screen (title + list + buttons) scroll as one long page — sticky
+   positioning on the action bar technically still worked, but the agent
+   had to scroll all the way through a very long list before "Quick scan"
+   or "Finish visit" were ever back in the thumb zone. Pinning the header
+   and action bar outside the scrolling region means those two buttons are
+   always exactly where a thumb expects them, regardless of list length. */
+#screen-checklist {
+  overflow-y: hidden;
+  /* The base .screen padding reserves extra bottom space for an action
+     bar that used to float over scrolling content. Here the action bar is
+     a normal, non-overlapping flex child (see .rack-list-scroll below) and
+     already adds its own safe-area padding, so that reserved space would
+     just be wasted room subtracted from the scrollable list instead. */
+  padding-bottom: 24px;
+}
+#screen-checklist .rack-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 14px;
+}
+#screen-checklist .rack-list-scroll .rack-list { margin: 0; }
+
+/* ── Rack tag / tag-state ─────────────────────────────────────────── */
 .rack-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .rack-tag {
   background: var(--card);
@@ -132,20 +197,39 @@ button, input, select, textarea { font-family: inherit; font-size: 16px; }
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  cursor: pointer;
 }
-.rack-tag.verified { border-left-color: var(--pass); }
-.rack-tag.issue { border-left-color: var(--alert); }
-.rack-tag.resolved { border-left-color: var(--pass); }
-.rack-tag.inactive { border-left-color: var(--line); opacity: 0.55; }
+/* Verified / issue / resolved / inactive rows are tap-blocked in app.js
+   (nothing left to do, or nothing the app itself can fix) — default cursor
+   signals that at a glance instead of the pointer cursor implying an action. */
+.rack-tag.verified { border-left-color: var(--pass); cursor: default; }
+.rack-tag.issue { border-left-color: var(--alert); cursor: default; }
+.rack-tag.resolved { border-left-color: var(--pass); cursor: default; }
+.rack-tag.inactive { border-left-color: var(--line); opacity: 0.55; cursor: default; }
 .rack-tag .rack-label-main { font-family: var(--font-mono); font-size: 15px; }
 .rack-tag .rack-id { font-family: var(--font-mono); font-size: 15px; }
 .rack-tag .rack-label { color: var(--muted); font-size: 13px; margin-top: 2px; }
 .tag-state { font-size: 12px; font-weight: 600; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
-.tag-state.pending { background: var(--line); color: var(--ink); }
 .tag-state.verified { background: var(--pass-bg); color: var(--pass); }
 .tag-state.resolved { background: var(--pass-bg); color: var(--pass); }
 .tag-state.issue { background: var(--alert-bg); color: var(--alert); }
 .tag-state.inactive { background: var(--line); color: var(--muted); }
+/* "Scan Me" (unscanned, action-needed) is deliberately the LOUDEST state
+   on the checklist, not another soft gray chip — it's the one thing on
+   this screen the agent still has to go do, so it needs to visually
+   outrank the calmer "already handled" states (verified/resolved's soft
+   green, issue's soft red, inactive's flat gray) instead of blending in
+   next to them. Solid ink fill + a small dot does that without adding a
+   new color to the palette. */
+.tag-state.pending {
+  background: var(--ink); color: var(--card);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.tag-state.pending::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--card); flex-shrink: 0;
+}
+.rack-tag.pending { border-left-color: var(--ink); }
 
 /* ── Camera / scan views ──────────────────────────────────────── */
 .camera-wrap { position: relative; background: var(--ink); border-radius: var(--radius); overflow: hidden; aspect-ratio: 3/4; }
@@ -236,6 +320,7 @@ canvas.signature-pad { width: 100%; aspect-ratio: 5/2; background: var(--card); 
 .modal-box {
   background: var(--card); border-radius: var(--radius);
   padding: 22px 20px; width: 100%; max-width: 360px;
+  max-height: calc(100% - 40px); overflow-y: auto;
 }
 .modal-box p { margin: 0 0 18px; font-size: 15px; line-height: 1.5; }
 
@@ -249,3 +334,29 @@ canvas.signature-pad { width: 100%; aspect-ratio: 5/2; background: var(--card); 
 .rack-dimensions .dim-row span:last-child { font-family: var(--font-mono); color: var(--muted); }
 
 .required-mark { color: var(--alert); }
+
+/* ── Report screen: safe exit + lighter visual grouping ───────────────
+   A dedicated "Cancel" link at the very TOP of the screen, separate from
+   the two submit buttons at the bottom — this is what lets an agent who
+   opened this screen by mistake (e.g. a misclick on "Report this rack"
+   right after a successful verify) leave immediately without wading
+   through the whole form first, and without it being confusable with
+   either of the two actions that actually write something to Salesforce. */
+.report-header-row { margin: -6px 0 4px; }
+.btn-back-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--card); border: 1.5px solid var(--ink);
+  border-radius: 999px; padding: 9px 16px 9px 12px;
+  color: var(--ink); font-size: 14px; font-weight: 700;
+  cursor: pointer;
+}
+.btn-back-link:active { background: var(--ink); color: var(--card); }
+
+/* Small caps-style dividers that split the report form into "what's
+   wrong" vs "evidence" instead of one long undifferentiated stack of
+   fields — the same fields as before, just visibly grouped. */
+.form-section-label {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); margin: 18px 0 10px;
+}
+.form-section-label:first-of-type { margin-top: 4px; }
